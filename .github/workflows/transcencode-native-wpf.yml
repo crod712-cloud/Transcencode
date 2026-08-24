@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - "transcencode/**"
+  pull_request:
+    branches:
+      - master
 
 concurrency:
   group: transcencode-native-wpf-${{ github.ref }}
