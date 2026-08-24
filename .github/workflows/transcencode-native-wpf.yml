@@ -1,0 +1,186 @@
+name: Transcencode Native WPF Alpha
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/**"
+
+concurrency:
+  group: transcencode-native-wpf-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate_overlay:
+    name: Validate native GUI source overlay
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Expand Transcencode native WPF source
+        run: |
+          mkdir -p .transcencode-bootstrap
+          tar -xJf transcencode/bootstrap/native-wpf-alpha.tar.xz -C .transcencode-bootstrap
+          test -f .transcencode-bootstrap/transcencode/patch/Apply-TranscencodePatch.ps1
+          test -f .transcencode-bootstrap/transcencode/overlay/win/CS/HandBrakeWPF/ViewModels/TranscencodeAnalyzeViewModel.cs
+          test -f .transcencode-bootstrap/transcencode/overlay/win/CS/HandBrakeWPF/Views/Transcencode/TranscencodeAnalyzeView.xaml
+
+      - name: Validate XAML and source structure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = '.transcencode-bootstrap/transcencode/overlay/win/CS/HandBrakeWPF'
+          $xamlFiles = Get-ChildItem $root -Recurse -Filter '*.xaml'
+          if ($xamlFiles.Count -lt 5) { throw 'Expected at least five native Transcencode XAML views.' }
+          foreach ($file in $xamlFiles) {
+            [xml](Get-Content $file.FullName -Raw) | Out-Null
+          }
+          $csFiles = Get-ChildItem $root -Recurse -Filter '*.cs'
+          if ($csFiles.Count -lt 15) { throw 'Expected native Transcencode C# source files.' }
+          Write-Host "Validated $($xamlFiles.Count) XAML files and $($csFiles.Count) C# files."
+
+  build_native:
+    name: Build HandBrake native engine with NVENC/NVDEC
+    runs-on: ubuntu-24.04
+    needs: validate_overlay
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cargo-C toolchain cache
+        id: windows-cargo-c-toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-capi
+            ~/.cargo/bin/cargo-cbuild
+            ~/.cargo/bin/cargo-cinstall
+          key: ${{ runner.os }}-${{ runner.arch }}-transcencode-windows-cargo-c-toolchain
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y automake autoconf build-essential libtool libtool-bin make meson nasm patch tar yasm zlib1g-dev ninja-build gzip pax libssl-dev
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: Install verified MinGW toolchain
+        run: |
+          wget -q https://github.com/HandBrake/HandBrake-toolchains/releases/download/1.0/mingw-w64-toolchain-12.0.0-ucrt-linux-x86_64.tar.gz
+          echo "43abbe33e79d273da2cd102fe45e196b56b5bc92  mingw-w64-toolchain-12.0.0-ucrt-linux-x86_64.tar.gz" | sha1sum --check -
+          mkdir toolchains
+          tar -xzf mingw-w64-toolchain-12.0.0-ucrt-linux-x86_64.tar.gz -C toolchains
+
+      - name: Install cargo-c
+        if: steps.windows-cargo-c-toolchain.outputs.cache-hit != 'true'
+        run: cargo install cargo-c
+
+      - name: Build CLI and LibHB
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchains/mingw-w64-toolchain-12.0.0-ucrt-linux-x86_64/mingw-w64-x86_64/bin:${PATH}"
+          export PATH=/usr/bin:$PATH
+          ./configure --cross=x86_64-w64-mingw32 --enable-qsv --enable-vce --enable-nvenc --enable-nvdec --launch-jobs=0 --launch
+          cd build
+          make pkg.create.zip
+
+      - name: Upload HandBrakeCLI
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-HandBrakeCLI-x64
+          path: ./build/HandBrakeCLI.exe
+          if-no-files-found: error
+
+      - name: Upload LibHB
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-LibHB-x64
+          path: ./build/libhb/hb.dll
+          if-no-files-found: error
+
+  build_gui:
+    name: Build native Transcencode Windows GUI
+    runs-on: windows-2022
+    needs: build_native
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Expand and apply native Transcencode WPF patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path '.transcencode-bootstrap' -Force | Out-Null
+          tar -xJf 'transcencode/bootstrap/native-wpf-alpha.tar.xz' -C '.transcencode-bootstrap'
+          & '.transcencode-bootstrap/transcencode/patch/Apply-TranscencodePatch.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path '.transcencode-bootstrap/transcencode/overlay')
+
+      - name: Download LibHB
+        uses: actions/download-artifact@v8
+        with:
+          name: Transcencode-LibHB-x64
+          path: win/CS/HandBrakeWPF/bin/publish
+
+      - name: Download HandBrakeCLI
+        uses: actions/download-artifact@v8
+        with:
+          name: Transcencode-HandBrakeCLI-x64
+          path: .transcencode-native
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Add NSIS to PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files (x86)\NSIS'
+
+      - name: Build Windows WPF GUI and upstream installer
+        shell: pwsh
+        run: |
+          dotnet msbuild win\CS\build.xml /t:x64 /p:PfxFile= /p:PfxPwd= /p:SignTimestampServer=
+
+      - name: Stage Transcencode runtime and packages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = 'win/CS/HandBrakeWPF/bin/publish'
+          $cli = Get-ChildItem '.transcencode-native' -Filter 'HandBrakeCLI.exe' -Recurse | Select-Object -First 1
+          if ($null -eq $cli) { throw 'HandBrakeCLI artifact was not downloaded.' }
+          Copy-Item $cli.FullName (Join-Path $publish 'HandBrakeCLI.exe') -Force
+
+          if (-not (Test-Path (Join-Path $publish 'HandBrake.exe'))) {
+            throw 'The native HandBrake WPF executable was not produced.'
+          }
+
+          New-Item -ItemType Directory -Path 'artifacts/Transcencode' -Force | Out-Null
+          Copy-Item "$publish/*" 'artifacts/Transcencode' -Recurse -Force
+          @"
+          Transcencode native WPF alpha
+          Analyze. Encode. Verify.
+
+          This build keeps HandBrake.exe as the internal executable name for initial worker/process compatibility.
+          The visible product title is Transcencode. Executable renaming and fully rebranded NSIS packaging are tracked separately.
+          "@ | Set-Content 'artifacts/Transcencode/TRANSCENCODE-ALPHA.txt' -Encoding UTF8
+
+          Compress-Archive -Path 'artifacts/Transcencode' -DestinationPath 'artifacts/Transcencode-Windows-x64-Portable.zip' -Force
+
+          $upstreamInstaller = Get-ChildItem 'win/CS/HandBrakeWPF/bin' -Filter 'HandBrake-*-Win_GUI.exe' -Recurse | Select-Object -First 1
+          if ($null -ne $upstreamInstaller) {
+            Copy-Item $upstreamInstaller.FullName 'artifacts/Transcencode-Native-WPF-Alpha-Upstream-Packaging.exe' -Force
+          }
+
+      - name: Upload portable native GUI build
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Windows-x64-Portable
+          path: artifacts/Transcencode-Windows-x64-Portable.zip
+          if-no-files-found: error
+
+      - name: Upload temporary installer build
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Native-WPF-Alpha-Installer
+          path: artifacts/Transcencode-Native-WPF-Alpha-Upstream-Packaging.exe
+          if-no-files-found: warn
