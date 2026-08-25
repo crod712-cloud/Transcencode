@@ -1,0 +1,313 @@
+name: Transcencode Windows UI End-to-End
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/native-wpf-alpha"
+    paths:
+      - ".github/workflows/transcencode-ui-e2e.yml"
+      - "transcencode/bootstrap/native-wpf-alpha.tar.xz"
+      - "transcencode/hardening/**"
+      - "transcencode/hardening-overlay/**"
+
+concurrency:
+  group: transcencode-ui-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ui_e2e:
+    name: Open source, inspect tracks, run Analyze, and exercise tabs
+    runs-on: windows-2022
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Apply native GUI and hardening patches
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path '.transcencode-bootstrap' -Force | Out-Null
+          tar -xJf 'transcencode/bootstrap/native-wpf-alpha.tar.xz' -C '.transcencode-bootstrap'
+          & '.transcencode-bootstrap/transcencode/patch/Apply-TranscencodePatch.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path '.transcencode-bootstrap/transcencode/overlay')
+          & 'transcencode/hardening/Apply-TranscencodeHardening.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path 'transcencode/hardening-overlay')
+
+      - name: Download verified runtime and build WPF application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Path '.runtime' -Force | Out-Null
+          Invoke-WebRequest 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/LibHB-1.11.2-win-x86_64.zip' -OutFile '.runtime/libhb.zip'
+          Invoke-WebRequest 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/HandBrakeCLI-1.11.2-win-x86_64.zip' -OutFile '.runtime/cli.zip'
+          if ((Get-FileHash '.runtime/libhb.zip' -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'd9bd679822f2c313f4918e7833eb2f57a9d2ceeb7ed0152343bc99c9cb44bdb0') { throw 'LibHB checksum mismatch.' }
+          if ((Get-FileHash '.runtime/cli.zip' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '80bfe8d5f5d11cc3ef76b834add3ed4e82dee6523ffeb435c283f88b1a21f09d') { throw 'CLI checksum mismatch.' }
+          Expand-Archive '.runtime/libhb.zip' '.runtime/libhb' -Force
+          Expand-Archive '.runtime/cli.zip' '.runtime/cli' -Force
+
+          dotnet publish 'win/CS/HandBrakeWPF/HandBrakeWPF.csproj' -p:PublishProfile=publish_x64
+          dotnet publish 'win/CS/HandBrake.Worker/HandBrake.Worker.csproj' -p:PublishProfile=publish_x64
+          $publish = 'win/CS/HandBrakeWPF/bin/publish'
+          Copy-Item 'win/CS/HandBrake.Worker/bin/publish/*' $publish -Recurse -Force
+          Copy-Item (Get-ChildItem '.runtime/libhb' -Filter hb.dll -Recurse | Select-Object -First 1).FullName (Join-Path $publish 'hb.dll') -Force
+          Copy-Item (Get-ChildItem '.runtime/cli' -Filter HandBrakeCLI.exe -Recurse | Select-Object -First 1).FullName (Join-Path $publish 'HandBrakeCLI.exe') -Force
+
+      - name: Create multi-language source file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          }
+          New-Item -ItemType Directory -Path 'e2e','e2e/screenshots','e2e/AppData','e2e/LocalAppData' -Force | Out-Null
+          @"
+          1
+          00:00:00,000 --> 00:00:02,000
+          English subtitle
+          "@ | Set-Content 'e2e/english.srt' -Encoding UTF8
+          @"
+          1
+          00:00:00,000 --> 00:00:02,000
+          Subtitulo en espanol
+          "@ | Set-Content 'e2e/spanish.srt' -Encoding UTF8
+          ffmpeg -hide_banner -loglevel error -y `
+            -f lavfi -i 'testsrc2=size=1280x720:rate=30:duration=8' `
+            -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=8' `
+            -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=8' `
+            -i 'e2e/english.srt' -i 'e2e/spanish.srt' `
+            -map 0:v -map 1:a -map 2:a -map 3:s -map 4:s `
+            -c:v libx264 -preset ultrafast -crf 20 -c:a aac -c:s srt `
+            -metadata:s:a:0 language=eng -metadata:s:a:0 title='English Test' `
+            -metadata:s:a:1 language=spa -metadata:s:a:1 title='Spanish Test' `
+            -metadata:s:s:0 language=eng -metadata:s:s:0 title='English Test' `
+            -metadata:s:s:1 language=spa -metadata:s:s:1 title='Spanish Test' `
+            'e2e/Transcencode-E2E-Source.mkv'
+
+      - name: Exercise native Windows GUI with UI Automation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+
+          function Find-AllByControlType {
+            param($Root, $ControlType)
+            $condition = New-Object System.Windows.Automation.PropertyCondition(
+              [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+              $ControlType)
+            return $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+          }
+
+          function Get-ElementNames {
+            param($Root)
+            $elements = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+            $result = @()
+            foreach ($element in $elements) {
+              try {
+                $name = $element.Current.Name
+                if (-not [string]::IsNullOrWhiteSpace($name)) { $result += $name }
+              } catch { }
+            }
+            return $result
+          }
+
+          function Save-WindowScreenshot {
+            param($Element, [string]$Path)
+            $rect = $Element.Current.BoundingRectangle
+            if ($rect.Width -lt 50 -or $rect.Height -lt 50) { return }
+            $bitmap = New-Object System.Drawing.Bitmap([int]$rect.Width, [int]$rect.Height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+              $graphics.CopyFromScreen([int]$rect.X, [int]$rect.Y, 0, 0, $bitmap.Size)
+              $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+            } finally {
+              $graphics.Dispose()
+              $bitmap.Dispose()
+            }
+          }
+
+          function Select-Tab {
+            param($Root, [string]$Name)
+            $tabs = Find-AllByControlType $Root ([System.Windows.Automation.ControlType]::TabItem)
+            foreach ($tab in $tabs) {
+              if ($tab.Current.Name -eq $Name) {
+                $pattern = $tab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+                $pattern.Select()
+                Start-Sleep -Milliseconds 700
+                return
+              }
+            }
+            throw "Tab was not found: $Name"
+          }
+
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+          $sourcePath = (Resolve-Path 'e2e/Transcencode-E2E-Source.mkv').Path
+          $env:APPDATA = (Resolve-Path 'e2e/AppData').Path
+          $env:LOCALAPPDATA = (Resolve-Path 'e2e/LocalAppData').Path
+          $process = Start-Process (Join-Path $publish 'HandBrake.exe') -WorkingDirectory $publish -PassThru
+
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+              Start-Sleep -Milliseconds 500
+              $process.Refresh()
+              if ($process.HasExited) { throw "Application exited during startup: $($process.ExitCode)" }
+            } while ($process.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $deadline)
+            if ($process.MainWindowHandle -eq 0) { throw 'No main window was created.' }
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+            Save-WindowScreenshot $root 'e2e/screenshots/01-startup.png'
+
+            # HandBrake opens with its source-selection panel. Invoke the File button.
+            $fileButton = $null
+            foreach ($button in (Find-AllByControlType $root ([System.Windows.Automation.ControlType]::Button))) {
+              if ($button.Current.Name -match '^(File|Open File)$') { $fileButton = $button; break }
+            }
+            if ($null -eq $fileButton) {
+              $names = Get-ElementNames $root
+              $names | Sort-Object -Unique | Set-Content 'e2e/startup-elements.txt' -Encoding UTF8
+              throw 'Could not find the source-selection File button.'
+            }
+            ($fileButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()
+
+            # Find the Windows file-open dialog owned by this process.
+            $dialog = $null
+            $dialogDeadline = [DateTime]::UtcNow.AddSeconds(20)
+            do {
+              Start-Sleep -Milliseconds 300
+              $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+                [System.Windows.Automation.TreeScope]::Children,
+                (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Window)))
+              foreach ($window in $windows) {
+                if ($window.Current.ProcessId -eq $process.Id -and $window.Current.Name -match '(?i)open|select') { $dialog = $window; break }
+              }
+            } while ($null -eq $dialog -and [DateTime]::UtcNow -lt $dialogDeadline)
+            if ($null -eq $dialog) { throw 'The file-open dialog did not appear.' }
+
+            $editControls = Find-AllByControlType $dialog ([System.Windows.Automation.ControlType]::Edit)
+            if ($editControls.Count -lt 1) { throw 'The file-open dialog did not expose a filename field.' }
+            $fileNameEdit = $editControls[$editControls.Count - 1]
+            ($fileNameEdit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)).SetValue($sourcePath)
+
+            $openButton = $null
+            foreach ($button in (Find-AllByControlType $dialog ([System.Windows.Automation.ControlType]::Button))) {
+              if ($button.Current.Name -match '^(Open|Select)$') { $openButton = $button; break }
+            }
+            if ($null -eq $openButton) { throw 'The file-open dialog did not expose an Open button.' }
+            ($openButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()
+
+            # Wait for scan completion and the normal tabs to become available.
+            $scanDeadline = [DateTime]::UtcNow.AddSeconds(90)
+            $scanned = $false
+            do {
+              Start-Sleep -Seconds 1
+              $process.Refresh()
+              if ($process.HasExited) { throw "Application exited during source scan: $($process.ExitCode)" }
+              $names = Get-ElementNames $root
+              if ($names -contains 'Source Tracks' -and ($names -join ' ') -match 'Transcencode-E2E-Source') { $scanned = $true }
+              # The source filename is not exposed by every theme; enabled Analyze is also evidence of scan completion.
+              if (-not $scanned) {
+                foreach ($tab in (Find-AllByControlType $root ([System.Windows.Automation.ControlType]::TabItem))) {
+                  if ($tab.Current.Name -eq 'Analyze' -and $tab.Current.IsEnabled) { $scanned = $true; break }
+                }
+              }
+            } while (-not $scanned -and [DateTime]::UtcNow -lt $scanDeadline)
+            if (-not $scanned) { throw 'Source scan did not complete within 90 seconds.' }
+            Save-WindowScreenshot $root 'e2e/screenshots/02-source-loaded.png'
+
+            Select-Tab $root 'Source Tracks'
+            Save-WindowScreenshot $root 'e2e/screenshots/03-source-tracks.png'
+            $trackText = (Get-ElementNames $root) -join "`n"
+            $trackText | Set-Content 'e2e/source-tracks-elements.txt' -Encoding UTF8
+            if ($trackText -notmatch '(?i)English|eng') { throw 'Source Tracks did not expose the English track.' }
+            if ($trackText -notmatch '(?i)Spanish|spa') { throw 'Source Tracks did not expose the Spanish track.' }
+
+            Select-Tab $root 'Analyze'
+            Save-WindowScreenshot $root 'e2e/screenshots/04-analyze-before.png'
+            $analyzeButton = $null
+            foreach ($button in (Find-AllByControlType $root ([System.Windows.Automation.ControlType]::Button))) {
+              if ($button.Current.IsEnabled -and $button.Current.Name -match '(?i)analy[sz]e' -and $button.Current.Name -notmatch '(?i)cancel') {
+                $analyzeButton = $button
+                break
+              }
+            }
+            if ($null -eq $analyzeButton) {
+              (Get-ElementNames $root) | Sort-Object -Unique | Set-Content 'e2e/analyze-elements.txt' -Encoding UTF8
+              throw 'Analyze tab did not expose an enabled Analyze button.'
+            }
+            ($analyzeButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)).Invoke()
+
+            $analysisDeadline = [DateTime]::UtcNow.AddSeconds(90)
+            do {
+              Start-Sleep -Seconds 1
+              $process.Refresh()
+              if ($process.HasExited) { throw "Application exited during analysis: $($process.ExitCode)" }
+              $analysisText = (Get-ElementNames $root) -join "`n"
+              $complete = $analysisText -match '(?i)analysis complete|recommendation|recommended'
+            } while (-not $complete -and [DateTime]::UtcNow -lt $analysisDeadline)
+            if (-not $complete) { throw 'Analyze did not produce a recommendation within 90 seconds.' }
+            $analysisText | Set-Content 'e2e/analyze-result-elements.txt' -Encoding UTF8
+            Save-WindowScreenshot $root 'e2e/screenshots/05-analyze-result.png'
+
+            foreach ($tabName in @('Upscale & Enhance','Verify','Live Engine','Dimensions','Video')) {
+              Select-Tab $root $tabName
+              $safeName = $tabName.ToLowerInvariant().Replace(' ','-').Replace('&','and')
+              Save-WindowScreenshot $root "e2e/screenshots/tab-$safeName.png"
+              $process.Refresh()
+              if ($process.HasExited) { throw "Application crashed while opening $tabName." }
+            }
+
+            # Verify the clarified crop wording is in the live WPF automation tree after opening Dimensions.
+            Select-Tab $root 'Dimensions'
+            $comboBoxes = Find-AllByControlType $root ([System.Windows.Automation.ControlType]::ComboBox)
+            $cropLabels = @()
+            foreach ($combo in $comboBoxes) {
+              try {
+                $expand = $combo.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+                $expand.Expand()
+                Start-Sleep -Milliseconds 250
+                $items = $combo.FindAll(
+                  [System.Windows.Automation.TreeScope]::Descendants,
+                  (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::ListItem)))
+                foreach ($item in $items) { $cropLabels += $item.Current.Name }
+                $expand.Collapse()
+              } catch { }
+            }
+            $cropLabels | Sort-Object -Unique | Set-Content 'e2e/crop-labels.txt' -Encoding UTF8
+            if ($cropLabels -notcontains 'Same as source (preserve original black bars)') {
+              throw 'The clarified Same as source black-bar option was not present.'
+            }
+          }
+          finally {
+            if ($null -ne $process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: Collect application logs
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path 'e2e/collected-logs' -Force | Out-Null
+          foreach ($root in @('e2e/AppData','e2e/LocalAppData')) {
+            if (Test-Path $root) { Copy-Item $root 'e2e/collected-logs' -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: Upload UI test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Windows-UI-E2E-Evidence
+          path: |
+            e2e/screenshots
+            e2e/*.txt
+            e2e/collected-logs
+          if-no-files-found: warn

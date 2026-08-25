@@ -1,0 +1,49 @@
+name: Expand Transcencode Native Source
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/native-wpf-alpha"
+    paths:
+      - "transcencode/bootstrap/native-wpf-alpha.tar.xz"
+      - ".github/workflows/transcencode-expand-source.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  expand_source:
+    name: Commit reviewable native WPF source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: transcencode/native-wpf-alpha
+          fetch-depth: 0
+
+      - name: Expand source archive
+        run: |
+          set -euo pipefail
+          rm -rf .transcencode-expanded transcencode/source
+          mkdir -p .transcencode-expanded transcencode/source
+          tar -xJf transcencode/bootstrap/native-wpf-alpha.tar.xz -C .transcencode-expanded
+          cp -a .transcencode-expanded/transcencode/overlay transcencode/source/overlay
+          cp -a .transcencode-expanded/transcencode/patch transcencode/source/patch
+          if [ -f .transcencode-expanded/transcencode/README.md ]; then
+            cp .transcencode-expanded/transcencode/README.md transcencode/source/README.md
+          fi
+          find transcencode/source -type f -print | sort > transcencode/source/FILE-MANIFEST.txt
+
+      - name: Commit expanded source when changed
+        run: |
+          set -euo pipefail
+          git config user.name "Transcencode Build Bot"
+          git config user.email "transcencode-build@users.noreply.github.com"
+          git add transcencode/source
+          if git diff --cached --quiet; then
+            echo "Expanded source is already current."
+            exit 0
+          fi
+          git commit -m "Dev: expand native WPF source for review and testing"
+          git push origin HEAD:transcencode/native-wpf-alpha

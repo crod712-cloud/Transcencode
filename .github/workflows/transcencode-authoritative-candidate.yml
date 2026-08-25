@@ -1,0 +1,311 @@
+name: Transcencode Authoritative Windows Candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/native-wpf-alpha"
+    paths:
+      - ".github/workflows/transcencode-authoritative-candidate.yml"
+      - "transcencode/bootstrap/native-wpf-alpha.tar.xz"
+      - "transcencode/hardening/**"
+      - "transcencode/hardening-overlay/**"
+      - "transcencode/tests/**"
+
+concurrency:
+  group: transcencode-authoritative-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  native_engine:
+    name: Build native HandBrake engine with NVENC and NVDEC
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache cargo-c tools
+        id: cargo-c-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-capi
+            ~/.cargo/bin/cargo-cbuild
+            ~/.cargo/bin/cargo-cinstall
+          key: ${{ runner.os }}-${{ runner.arch }}-transcencode-cargo-c-v1
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y automake autoconf build-essential libtool libtool-bin make meson nasm patch tar yasm zlib1g-dev ninja-build gzip pax libssl-dev
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: Install and verify MinGW toolchain
+        run: |
+          set -euo pipefail
+          wget -q https://github.com/HandBrake/HandBrake-toolchains/releases/download/1.0/mingw-w64-toolchain-12.0.0-ucrt-linux-x86_64.tar.gz
+          echo "43abbe33e79d273da2cd102fe45e196b56b5bc92  mingw-w64-toolchain-12.0.0-ucrt-linux-x86_64.tar.gz" | sha1sum --check -
+          mkdir -p toolchains
+          tar -xzf mingw-w64-toolchain-12.0.0-ucrt-linux-x86_64.tar.gz -C toolchains
+
+      - name: Install cargo-c
+        if: steps.cargo-c-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-c
+
+      - name: Configure and build native Windows engine
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/toolchains/mingw-w64-toolchain-12.0.0-ucrt-linux-x86_64/mingw-w64-x86_64/bin:${PATH}"
+          export PATH=/usr/bin:$PATH
+          ./configure --cross=x86_64-w64-mingw32 --enable-qsv --enable-vce --enable-nvenc --enable-nvdec --launch-jobs=0 --launch
+          cd build
+          make pkg.create.zip
+          test -f HandBrakeCLI.exe
+          test -f libhb/hb.dll
+
+      - name: Record native feature evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/native-evidence
+          cp build/HandBrakeCLI.exe artifacts/native-evidence/
+          cp build/libhb/hb.dll artifacts/native-evidence/
+          {
+            echo "Transcencode native engine build"
+            echo "configure flags: --enable-nvenc --enable-nvdec --enable-qsv --enable-vce"
+            sha256sum build/HandBrakeCLI.exe build/libhb/hb.dll
+          } > artifacts/native-evidence/NATIVE-BUILD-EVIDENCE.txt
+
+      - name: Upload native engine
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Native-Engine-x64
+          path: artifacts/native-evidence
+          if-no-files-found: error
+
+  windows_candidate:
+    name: Build, test, launch, and package native WPF candidate
+    runs-on: windows-2022
+    needs: native_engine
+    timeout-minutes: 55
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download native NVENC/NVDEC engine
+        uses: actions/download-artifact@v8
+        with:
+          name: Transcencode-Native-Engine-x64
+          path: .native-engine
+
+      - name: Apply native GUI and hardening patches
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path '.transcencode-bootstrap' -Force | Out-Null
+          tar -xJf 'transcencode/bootstrap/native-wpf-alpha.tar.xz' -C '.transcencode-bootstrap'
+          & '.transcencode-bootstrap/transcencode/patch/Apply-TranscencodePatch.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path '.transcencode-bootstrap/transcencode/overlay')
+          & 'transcencode/hardening/Apply-TranscencodeHardening.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path 'transcencode/hardening-overlay')
+
+      - name: Validate XAML and source anchors
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem 'win/CS/HandBrakeWPF/Views' -Recurse -Filter '*.xaml' | ForEach-Object {
+            [xml](Get-Content $_.FullName -Raw) | Out-Null
+          }
+          $requiredFiles = @(
+            'win/CS/HandBrakeWPF/Converters/Picture/TranscencodeCropModeConverter.cs',
+            'win/CS/HandBrakeWPF/Services/Transcencode/TranscencodeCrashReporter.cs'
+          )
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) { throw "Required hardened source was not applied: $file" }
+          }
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build application and regression tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet build 'win/CS/HandBrakeWPF/HandBrakeWPF.csproj' --configuration Release
+          dotnet build 'win/CS/HandBrake.Worker/HandBrake.Worker.csproj' --configuration Release
+          dotnet build 'transcencode/tests/Transcencode.NativeWpf.Tests/Transcencode.NativeWpf.Tests.csproj' --configuration Release
+
+      - name: Stage native DLL for tests and run regression suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $hbDll = (Resolve-Path '.native-engine/hb.dll').Path
+          Get-ChildItem 'transcencode/tests/Transcencode.NativeWpf.Tests/bin/Release' -Directory -Recurse | ForEach-Object {
+            Copy-Item $hbDll (Join-Path $_.FullName 'hb.dll') -Force -ErrorAction SilentlyContinue
+          }
+          dotnet test 'transcencode/tests/Transcencode.NativeWpf.Tests/Transcencode.NativeWpf.Tests.csproj' `
+            --configuration Release `
+            --no-build `
+            --logger 'trx;LogFileName=authoritative-native-wpf-tests.trx' `
+            --results-directory 'TestResults'
+
+      - name: Publish GUI and worker
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish 'win/CS/HandBrakeWPF/HandBrakeWPF.csproj' -p:PublishProfile=publish_x64
+          dotnet publish 'win/CS/HandBrake.Worker/HandBrake.Worker.csproj' -p:PublishProfile=publish_x64
+          $publish = 'win/CS/HandBrakeWPF/bin/publish'
+          Copy-Item 'win/CS/HandBrake.Worker/bin/publish/*' $publish -Recurse -Force
+          Copy-Item '.native-engine/hb.dll' (Join-Path $publish 'hb.dll') -Force
+          Copy-Item '.native-engine/HandBrakeCLI.exe' (Join-Path $publish 'HandBrakeCLI.exe') -Force
+
+      - name: Generate controlled media regression corpus
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          }
+          New-Item -ItemType Directory -Path 'candidate-test','candidate-test/AppData','candidate-test/LocalAppData','candidate-test/evidence' -Force | Out-Null
+          @"
+          1
+          00:00:00,000 --> 00:00:02,000
+          English regression subtitle
+          "@ | Set-Content 'candidate-test/en.srt' -Encoding UTF8
+          @"
+          1
+          00:00:00,000 --> 00:00:02,000
+          Subtitulo de regresion en espanol
+          "@ | Set-Content 'candidate-test/es.srt' -Encoding UTF8
+          ffmpeg -hide_banner -loglevel error -y `
+            -f lavfi -i 'color=black:size=1280x720:rate=30:duration=10' `
+            -f lavfi -i 'testsrc2=size=1280x536:rate=30:duration=10' `
+            -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=10' `
+            -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=10' `
+            -i 'candidate-test/en.srt' -i 'candidate-test/es.srt' `
+            -filter_complex '[0:v][1:v]overlay=0:92[v]' `
+            -map '[v]' -map 2:a -map 3:a -map 4:s -map 5:s `
+            -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p `
+            -c:a aac -b:a 128k -c:s srt `
+            -metadata:s:a:0 language=eng -metadata:s:a:0 title='English Test' `
+            -metadata:s:a:1 language=spa -metadata:s:a:1 title='Spanish Test' `
+            -metadata:s:s:0 language=eng -metadata:s:s:0 title='English Test' `
+            -metadata:s:s:1 language=spa -metadata:s:s:1 title='Spanish Test' `
+            'candidate-test/source-with-bars.mkv'
+
+      - name: Run CLI scan and encode regressions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+          $cli = Join-Path $publish 'HandBrakeCLI.exe'
+          & $cli --scan -i 'candidate-test/source-with-bars.mkv' 2>&1 | Tee-Object 'candidate-test/evidence/source-scan.txt'
+          if ($LASTEXITCODE -ne 0) { throw 'Source scan failed.' }
+          $scan = Get-Content 'candidate-test/evidence/source-scan.txt' -Raw
+          if ($scan -notmatch '(?i)English|eng' -or $scan -notmatch '(?i)Spanish|spa') { throw 'Language metadata was not discovered.' }
+
+          & $cli -i 'candidate-test/source-with-bars.mkv' -o 'candidate-test/same-as-source.mkv' `
+            -e x264 -q 22 --encoder-preset veryfast --crop-mode none --all-audio --all-subtitles 2>&1 | Tee-Object 'candidate-test/evidence/encode.txt'
+          if ($LASTEXITCODE -ne 0) { throw 'Controlled encode failed.' }
+          & $cli --scan -i 'candidate-test/same-as-source.mkv' 2>&1 | Tee-Object 'candidate-test/evidence/output-scan.txt'
+          if ($LASTEXITCODE -ne 0) { throw 'Output scan failed.' }
+          $outputScan = Get-Content 'candidate-test/evidence/output-scan.txt' -Raw
+          if ($outputScan -notmatch '1280x720') { throw 'Same as source did not preserve the full 1280x720 frame.' }
+
+      - name: Launch native WPF candidate and inspect automation tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+          $env:APPDATA = (Resolve-Path 'candidate-test/AppData').Path
+          $env:LOCALAPPDATA = (Resolve-Path 'candidate-test/LocalAppData').Path
+          $process = Start-Process (Join-Path $publish 'HandBrake.exe') -WorkingDirectory $publish -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(35)
+            do {
+              Start-Sleep -Milliseconds 500
+              $process.Refresh()
+              if ($process.HasExited) { throw "GUI exited during startup with code $($process.ExitCode)." }
+            } while ($process.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $deadline)
+            if ($process.MainWindowHandle -eq 0) { throw 'GUI did not create a main window.' }
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+            if ($root.Current.Name -notmatch '(?i)Transcencode') { throw "Unexpected window title: $($root.Current.Name)" }
+            $condition = New-Object System.Windows.Automation.PropertyCondition(
+              [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+              [System.Windows.Automation.ControlType]::TabItem)
+            $tabs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+            $names = @()
+            foreach ($tab in $tabs) { $names += $tab.Current.Name }
+            $names | Set-Content 'candidate-test/evidence/tabs.txt' -Encoding UTF8
+            foreach ($required in @('Summary','Dimensions','Filters','Video','Audio','Subtitles','Chapters','Analyze','Source Tracks','Upscale & Enhance','Verify','Live Engine')) {
+              if ($names -notcontains $required) { throw "Missing native tab: $required" }
+            }
+            Start-Sleep -Seconds 15
+            $process.Refresh()
+            if ($process.HasExited) { throw "GUI crashed during the 15-second stability window with code $($process.ExitCode)." }
+          }
+          finally {
+            if ($null -ne $process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: Scan local logs for crash signatures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($root in @('candidate-test/AppData','candidate-test/LocalAppData')) {
+            if (-not (Test-Path $root)) { continue }
+            foreach ($file in Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue) {
+              if ($file.Length -gt 20MB) { continue }
+              $text = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+              if ($text -match '(?i)unhandled exception|access violation|stack overflow|fatal error') {
+                throw "Crash signature found in $($file.FullName)"
+              }
+            }
+          }
+
+      - name: Stage test candidate only after all gates pass
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'artifacts/Transcencode-Candidate' -Force | Out-Null
+          Copy-Item 'win/CS/HandBrakeWPF/bin/publish/*' 'artifacts/Transcencode-Candidate' -Recurse -Force
+          Copy-Item '.native-engine/NATIVE-BUILD-EVIDENCE.txt' 'artifacts/Transcencode-Candidate/' -Force
+          @"
+          Transcencode Windows x64 test candidate
+          Analyze. Encode. Verify.
+
+          This artifact passed automated native-engine compilation, C# regression tests, controlled CLI scan/encode checks, same-as-source frame preservation, WPF startup, native-tab discovery, and a short crash-signature check.
+
+          It is still not a public release. Physical RTX 2080 Ti NVENC/NVDEC and extended media testing remain mandatory.
+          "@ | Set-Content 'artifacts/Transcencode-Candidate/TEST-CANDIDATE-NOT-RELEASE.txt' -Encoding UTF8
+          Compress-Archive 'artifacts/Transcencode-Candidate' 'artifacts/Transcencode-Windows-x64-Test-Candidate.zip' -Force
+
+      - name: Upload authoritative test candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Windows-x64-Test-Candidate
+          path: artifacts/Transcencode-Windows-x64-Test-Candidate.zip
+          if-no-files-found: error
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Authoritative-Test-Evidence
+          path: |
+            TestResults
+            candidate-test/evidence
+            candidate-test/AppData
+            candidate-test/LocalAppData
+          if-no-files-found: warn

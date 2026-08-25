@@ -1,0 +1,54 @@
+name: Transcencode Source Materialization
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/native-wpf-alpha"
+
+concurrency:
+  group: transcencode-materialize-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    name: Materialize and validate hardened native GUI source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Expand visible source and remove temporary archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f transcencode/bootstrap/hardening-source-v2.tar.xz
+          tar -xJf transcencode/bootstrap/hardening-source-v2.tar.xz -C .
+          rm -f transcencode/bootstrap/hardening-source-v2.tar.xz
+          rm -f transcencode/bootstrap/native-wpf-alpha.tar.xz
+          rmdir transcencode/bootstrap 2>/dev/null || true
+          rm -f .github/workflows/materialize-transcencode-hardening.yml
+
+      - name: Validate materialized source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet pyyaml lxml
+          python3 transcencode/tests/validate_overlay.py
+          rm -f validation.json MANIFEST.json
+
+      - name: Commit visible hardening source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Transcencode Build Bot"
+          git config user.email "transcencode-build@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Transcencode: harden native GUI and add runtime tests"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

@@ -1,0 +1,86 @@
+name: Transcencode Hardening V2 Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/native-wpf-alpha"
+    paths:
+      - "transcencode/hardening/Apply-TranscencodeHardeningV2.ps1"
+      - "transcencode/hardening/Apply-TranscencodeHardening.ps1"
+      - "transcencode/hardening-overlay/**"
+      - "transcencode/tests/**"
+      - ".github/workflows/transcencode-hardening-v2.yml"
+
+concurrency:
+  group: transcencode-hardening-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Compile and test current native UI hardening
+    runs-on: windows-2022
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Apply native GUI and current hardening layer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory '.transcencode-bootstrap' -Force | Out-Null
+          tar -xJf 'transcencode/bootstrap/native-wpf-alpha.tar.xz' -C '.transcencode-bootstrap'
+          & '.transcencode-bootstrap/transcencode/patch/Apply-TranscencodePatch.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path '.transcencode-bootstrap/transcencode/overlay')
+          & 'transcencode/hardening/Apply-TranscencodeHardeningV2.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path 'transcencode/hardening-overlay')
+
+      - name: Assert native source behavior
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pictureVm = Get-Content 'win/CS/HandBrakeWPF/ViewModels/PictureSettingsViewModel.cs' -Raw
+          $expected = 'new BindingList<CropMode> { CropMode.None, CropMode.Loose, CropMode.Automatic, CropMode.Custom }'
+          if (-not $pictureVm.Contains($expected)) { throw 'Same as source is not the first crop option.' }
+
+          $pictureXaml = Get-Content 'win/CS/HandBrakeWPF/Views/PictureSettingsView.xaml' -Raw
+          if ($pictureXaml -notmatch 'TranscencodeCropModeConverter') { throw 'Plain-language crop converter is missing.' }
+          [xml]$pictureXaml | Out-Null
+
+          $videoXaml = Get-Content 'win/CS/HandBrakeWPF/Views/VideoView.xaml' -Raw
+          if ($videoXaml -notmatch 'NVENC constant quality is not automatically lossless') { throw 'NVENC quality explanation is missing.' }
+          [xml]$videoXaml | Out-Null
+
+          $shellXaml = Get-Content 'win/CS/HandBrakeWPF/Views/ShellView.xaml' -Raw
+          foreach ($scale in @('100%','110%','125%','150%','175%','200%')) {
+            if ($shellXaml -notmatch [regex]::Escape($scale)) { throw "Interface scale choice missing: $scale" }
+          }
+          [xml]$shellXaml | Out-Null
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build and run native regression tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet test 'transcencode/tests/Transcencode.NativeWpf.Tests/Transcencode.NativeWpf.Tests.csproj' `
+            --configuration Release `
+            --logger 'trx;LogFileName=hardening-v2.trx' `
+            --results-directory 'TestResults'
+
+      - name: Upload regression results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Hardening-V2-Test-Results
+          path: TestResults
+          if-no-files-found: warn

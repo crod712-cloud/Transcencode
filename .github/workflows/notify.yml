@@ -1,22 +1,27 @@
-name: "Push Notification"
+name: Transcencode Bootstrap Export
+
 on:
   push:
-  pull_request:
-      types: [opened, review_requested]
+    branches:
+      - "transcencode/native-wpf-alpha"
+
+permissions:
+  contents: read
 
 jobs:
-  Send_IRC_Notification:
-    runs-on: ubuntu-latest
+  export:
+    name: Export current native WPF bootstrap
+    runs-on: ubuntu-24.04
     steps:
-      - name: Handle Commit
-        uses: rectalogic/notify-irc@v2
-        if: github.event_name == 'push' && github.repository == 'HandBrake/HandBrake'
+      - uses: actions/checkout@v7
+      - name: Validate archive
+        run: |
+          set -euo pipefail
+          xz --test transcencode/bootstrap/native-wpf-alpha.tar.xz
+          tar -tJf transcencode/bootstrap/native-wpf-alpha.tar.xz >/dev/null
+      - name: Upload bootstrap
+        uses: actions/upload-artifact@v7
         with:
-          channel: "#handbrake"
-          nickname: handbrake-bot
-          server: irc.libera.chat
-          sasl_password: ${{ secrets.LIBERACHAT_PWD }}
-          port: 6697
-          tls: true
-          message: |
-            COMMIT: ${{ github.actor }} pushed ${{ github.event.ref }} ${{ github.event.compare }} ${{ join(github.event.commits.*.message) }}
+          name: Transcencode-Native-WPF-Bootstrap
+          path: transcencode/bootstrap/native-wpf-alpha.tar.xz
+          if-no-files-found: error

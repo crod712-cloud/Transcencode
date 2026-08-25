@@ -1,0 +1,249 @@
+name: Transcencode Windows Runtime Smoke Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/native-wpf-alpha"
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: transcencode-windows-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  runtime_smoke:
+    name: Build, launch, analyze, encode, and inspect native WPF app
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Apply native Transcencode GUI and hardening patches
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & 'transcencode/source/patch/Apply-TranscencodePatch.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path 'transcencode/source/overlay')
+          & 'transcencode/hardening/Apply-TranscencodeHardeningV2.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path 'transcencode/hardening-overlay')
+
+      - name: Download and verify official HandBrake 1.11.2 runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Path '.handbrake-runtime' -Force | Out-Null
+          $libArchive = '.handbrake-runtime/LibHB-1.11.2-win-x86_64.zip'
+          $cliArchive = '.handbrake-runtime/HandBrakeCLI-1.11.2-win-x86_64.zip'
+          Invoke-WebRequest -Uri 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/LibHB-1.11.2-win-x86_64.zip' -OutFile $libArchive
+          Invoke-WebRequest -Uri 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/HandBrakeCLI-1.11.2-win-x86_64.zip' -OutFile $cliArchive
+          if ((Get-FileHash $libArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'd9bd679822f2c313f4918e7833eb2f57a9d2ceeb7ed0152343bc99c9cb44bdb0') {
+            throw 'LibHB checksum mismatch.'
+          }
+          if ((Get-FileHash $cliArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '80bfe8d5f5d11cc3ef76b834add3ed4e82dee6523ffeb435c283f88b1a21f09d') {
+            throw 'HandBrakeCLI checksum mismatch.'
+          }
+          Expand-Archive -LiteralPath $libArchive -DestinationPath '.handbrake-runtime/libhb' -Force
+          Expand-Archive -LiteralPath $cliArchive -DestinationPath '.handbrake-runtime/cli' -Force
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish patched native WPF GUI and worker
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish 'win/CS/HandBrakeWPF/HandBrakeWPF.csproj' -p:PublishProfile=publish_x64
+          dotnet publish 'win/CS/HandBrake.Worker/HandBrake.Worker.csproj' -p:PublishProfile=publish_x64
+          $publish = 'win/CS/HandBrakeWPF/bin/publish'
+          Copy-Item 'win/CS/HandBrake.Worker/bin/publish/*' $publish -Recurse -Force
+          $hbDll = Get-ChildItem '.handbrake-runtime/libhb' -Filter 'hb.dll' -Recurse | Select-Object -First 1
+          $cli = Get-ChildItem '.handbrake-runtime/cli' -Filter 'HandBrakeCLI.exe' -Recurse | Select-Object -First 1
+          if ($null -eq $hbDll -or $null -eq $cli) { throw 'Verified runtime archive was incomplete.' }
+          Copy-Item $hbDll.FullName (Join-Path $publish 'hb.dll') -Force
+          Copy-Item $cli.FullName (Join-Path $publish 'HandBrakeCLI.exe') -Force
+          foreach ($required in @('HandBrake.exe','HandBrake.Worker.exe','HandBrakeCLI.exe','hb.dll')) {
+            if (-not (Test-Path (Join-Path $publish $required))) { throw "Published runtime is missing $required." }
+          }
+
+      - name: Probe the real normal startup path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+          $smoke = Join-Path (Get-Location).Path 'smoke'
+          $appData = Join-Path $smoke 'NormalStartupAppData'
+          $localAppData = Join-Path $smoke 'NormalStartupLocalAppData'
+          $diagnostics = Join-Path $smoke 'NormalStartupDiagnostics'
+          New-Item -ItemType Directory -Path $appData,$localAppData,$diagnostics -Force | Out-Null
+
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = Join-Path $publish 'HandBrake.exe'
+          $startInfo.WorkingDirectory = $publish
+          $startInfo.UseShellExecute = $false
+          $startInfo.Environment['APPDATA'] = $appData
+          $startInfo.Environment['LOCALAPPDATA'] = $localAppData
+          $startInfo.Environment['TRANSCENCODE_DIAGNOSTIC_DIR'] = $diagnostics
+          [void]$startInfo.ArgumentList.Add('--no-hardware')
+          $process = [System.Diagnostics.Process]::Start($startInfo)
+          if ($null -eq $process) { throw 'Could not start the native Transcencode application.' }
+
+          try {
+            Start-Sleep -Seconds 15
+            $process.Refresh()
+            $reports = @(Get-ChildItem $diagnostics -File -ErrorAction SilentlyContinue)
+            if ($reports.Count -gt 0) {
+              foreach ($report in $reports) {
+                Write-Host "--- $($report.FullName) ---"
+                Write-Host (Get-Content $report.FullName -Raw)
+              }
+              throw 'The real normal startup path produced a diagnostic error report.'
+            }
+            if ($process.HasExited) { throw "Normal startup exited with code $($process.ExitCode)." }
+            @(
+              'TRANSCENCODE_NORMAL_STARTUP_PASSED',
+              'Process remained alive for 15 seconds.',
+              'No handled or unhandled startup report was written.',
+              "Settings root: $appData\Transcencode",
+              'Worker port: 8047'
+            ) | Set-Content (Join-Path $smoke 'NORMAL-STARTUP-PASSED.txt') -Encoding UTF8
+          }
+          finally {
+            if (-not $process.HasExited) {
+              $process.Kill($true)
+              $process.WaitForExit(10000) | Out-Null
+            }
+          }
+
+      - name: Install ffmpeg test dependency
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          }
+          ffmpeg -version | Select-Object -First 1
+
+      - name: Run black-bar, multilingual-track, and encode regression
+        shell: pwsh
+        run: |
+          & 'transcencode/tests/Run-CliRegression.ps1' `
+            -PublishDir 'win/CS/HandBrakeWPF/bin/publish' `
+            -SmokeDir 'smoke'
+
+      - name: Run native in-process WPF self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+          $smoke = (Resolve-Path 'smoke').Path
+          $source = (Resolve-Path 'smoke/source.mkv').Path
+          $report = Join-Path $smoke 'NATIVE-WPF-SELF-TEST.txt'
+          $appData = Join-Path $smoke 'SelfTestAppData'
+          $localAppData = Join-Path $smoke 'SelfTestLocalAppData'
+          $diagnostics = Join-Path $smoke 'SelfTestDiagnostics'
+          New-Item -ItemType Directory -Path $appData,$localAppData,$diagnostics -Force | Out-Null
+
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = Join-Path $publish 'HandBrake.exe'
+          $startInfo.WorkingDirectory = $publish
+          $startInfo.UseShellExecute = $false
+          $startInfo.Environment['APPDATA'] = $appData
+          $startInfo.Environment['LOCALAPPDATA'] = $localAppData
+          $startInfo.Environment['TRANSCENCODE_DIAGNOSTIC_DIR'] = $diagnostics
+          [void]$startInfo.ArgumentList.Add($source)
+          [void]$startInfo.ArgumentList.Add('--no-hardware')
+          [void]$startInfo.ArgumentList.Add("--transcencode-self-test-report=$report")
+          $process = [System.Diagnostics.Process]::Start($startInfo)
+          if ($null -eq $process) { throw 'Could not start the native WPF self-test.' }
+          if (-not $process.WaitForExit(240000)) {
+            $process.Kill($true)
+            throw 'The native WPF self-test exceeded four minutes.'
+          }
+          $reports = @(Get-ChildItem $diagnostics -File -ErrorAction SilentlyContinue)
+          if ($reports.Count -gt 0) {
+            foreach ($errorReport in $reports) {
+              Write-Host "--- $($errorReport.FullName) ---"
+              Write-Host (Get-Content $errorReport.FullName -Raw)
+            }
+            throw 'The native WPF self-test wrote a diagnostic error report.'
+          }
+          if (-not (Test-Path $report)) { throw "Self-test exited with code $($process.ExitCode) without a report." }
+          $reportText = Get-Content $report -Raw
+          Write-Host $reportText
+          if ($process.ExitCode -ne 0 -or $reportText -notmatch 'TRANSCENCODE_NATIVE_SELF_TEST_PASSED') {
+            throw 'The native WPF self-test did not pass.'
+          }
+
+      - name: Stage runtime-tested portable candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidate = 'artifacts/Transcencode-Test-Candidate'
+          New-Item -ItemType Directory -Path $candidate -Force | Out-Null
+          Copy-Item 'win/CS/HandBrakeWPF/bin/publish/*' $candidate -Recurse -Force
+          Copy-Item 'smoke/NORMAL-STARTUP-PASSED.txt' $candidate -Force
+          Copy-Item 'smoke/CLI-REGRESSION-PASSED.txt' $candidate -Force
+          Copy-Item 'smoke/NATIVE-WPF-SELF-TEST.txt' $candidate -Force
+          @(
+            'Transcencode Native WPF Test Candidate',
+            'Analyze. Encode. Verify.',
+            '',
+            'Passed the real no-argument normal startup path with a clean isolated Transcencode profile.',
+            'Passed multilingual source scanning, Same as source and automatic crop encodes,',
+            'the native WPF source scan, Source Tracks, Deep Analyze, application of the',
+            'recommendation to the real Video model, Upscale & Enhance, all new XAML views,',
+            'black-bar labels/order, and whole-interface scaling.',
+            '',
+            'Settings/presets/logs are isolated under %APPDATA%\Transcencode.',
+            'The fork-specific worker port is 8047.',
+            'The internal executable remains HandBrake.exe during compatibility testing.'
+          ) | Set-Content (Join-Path $candidate 'TEST-CANDIDATE.txt') -Encoding UTF8
+          Compress-Archive -Path $candidate -DestinationPath 'artifacts/Transcencode-Native-WPF-Test-Candidate-x64.zip' -Force
+
+      - name: Upload runtime-tested portable candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Native-WPF-Test-Candidate-x64
+          path: artifacts/Transcencode-Native-WPF-Test-Candidate-x64.zip
+          if-no-files-found: error
+
+      - name: Collect smoke-test diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if (-not (Test-Path 'smoke')) { exit 0 }
+          New-Item -ItemType Directory -Path 'smoke-diagnostics' -Force | Out-Null
+          Get-ChildItem 'smoke' -File | ForEach-Object {
+            if ($_.Length -lt 20MB) { Copy-Item $_.FullName 'smoke-diagnostics' -Force -ErrorAction SilentlyContinue }
+          }
+          foreach ($relative in @(
+            'smoke/NormalStartupAppData/Transcencode',
+            'smoke/NormalStartupLocalAppData/Transcencode',
+            'smoke/NormalStartupDiagnostics',
+            'smoke/SelfTestAppData/Transcencode',
+            'smoke/SelfTestLocalAppData/Transcencode',
+            'smoke/SelfTestDiagnostics')) {
+            if (Test-Path $relative) { Copy-Item $relative 'smoke-diagnostics' -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: Upload smoke-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Windows-Smoke-Diagnostics
+          path: smoke-diagnostics
+          if-no-files-found: warn

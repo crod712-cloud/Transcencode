@@ -1,0 +1,65 @@
+name: Transcencode Native WPF Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/native-wpf-alpha"
+    paths:
+      - "transcencode/tests/**"
+      - "transcencode/hardening/**"
+      - "transcencode/hardening-overlay/**"
+      - "transcencode/bootstrap/native-wpf-alpha.tar.xz"
+      - ".github/workflows/transcencode-native-tests.yml"
+
+concurrency:
+  group: transcencode-native-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and run native WPF regression tests
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Apply native GUI and hardening patches
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path '.transcencode-bootstrap' -Force | Out-Null
+          tar -xJf 'transcencode/bootstrap/native-wpf-alpha.tar.xz' -C '.transcencode-bootstrap'
+          & '.transcencode-bootstrap/transcencode/patch/Apply-TranscencodePatch.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path '.transcencode-bootstrap/transcencode/overlay')
+          & 'transcencode/hardening/Apply-TranscencodeHardening.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path 'transcencode/hardening-overlay')
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore, build, and test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet test 'transcencode/tests/Transcencode.NativeWpf.Tests/Transcencode.NativeWpf.Tests.csproj' `
+            --configuration Release `
+            --logger 'trx;LogFileName=transcencode-native-wpf-tests.trx' `
+            --results-directory 'TestResults' `
+            --collect 'XPlat Code Coverage'
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Native-WPF-Test-Results
+          path: TestResults
+          if-no-files-found: warn

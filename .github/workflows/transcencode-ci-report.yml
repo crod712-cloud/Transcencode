@@ -1,0 +1,61 @@
+name: Persist Transcencode CI Report
+
+on:
+  workflow_run:
+    workflows:
+      - "Transcencode Hardened Native WPF"
+      - "Transcencode Native WPF Alpha"
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  persist_report:
+    if: github.event.workflow_run.head_branch == 'transcencode/native-wpf-alpha'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: transcencode/native-wpf-alpha
+          fetch-depth: 0
+
+      - name: Write workflow report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p transcencode/test-results
+          slug="$(printf '%s' "$WORKFLOW_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
+          slug="${slug%-}"
+          report="transcencode/test-results/${slug}-latest.md"
+          jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100")"
+
+          {
+            echo "# ${WORKFLOW_NAME}"
+            echo
+            echo "- Conclusion: **${CONCLUSION}**"
+            echo "- Run: ${RUN_URL}"
+            echo "- Commit: \`${HEAD_SHA}\`"
+            echo "- Recorded: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo
+            echo "## Jobs and steps"
+            echo
+            jq -r '.jobs[] | "### " + .name + " — " + (.conclusion // .status), (.steps[]? | "- " + .name + ": " + (.conclusion // .status)), ""' <<<"${jobs_json}"
+          } > "${report}"
+
+          git config user.name "Transcencode CI Reporter"
+          git config user.email "transcencode-ci@users.noreply.github.com"
+          git add "${report}"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "CI: record ${WORKFLOW_NAME} result (${CONCLUSION})"
+          git push origin HEAD:transcencode/native-wpf-alpha
