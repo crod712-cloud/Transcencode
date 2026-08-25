@@ -1,0 +1,81 @@
+name: Adopt Canonical Transcencode CLI Source Normalizer
+
+on:
+  push:
+    branches:
+      - "transcencode/cli-stable"
+    paths:
+      - "transcencode-cli/tools/Normalize-CliSourceCore.py"
+      - ".github/workflows/adopt-cli-source-core.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: adopt-transcencode-cli-source-core
+  cancel-in-progress: false
+
+jobs:
+  adopt:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: transcencode/cli-stable
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Make V2 entry point delegate to the canonical source normalizer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          #!/usr/bin/env python3
+          from __future__ import annotations
+          import pathlib
+          import runpy
+
+          here = pathlib.Path(__file__).resolve().parent
+          runpy.run_path(str(here / "Normalize-CliSourceCore.py"), run_name="__main__")
+          '@ | Set-Content 'transcencode-cli/tools/Normalize-CliSourceV2.py' -Encoding UTF8
+
+      - name: Normalize, test, and compile
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python 'transcencode-cli/tools/Normalize-CliSourceV2.py'
+          dotnet run `
+            --project 'transcencode-cli/tests/Transcencode.CommandTests/Transcencode.CommandTests.csproj' `
+            --configuration Release
+          dotnet build `
+            'transcencode-cli/src/Transcencode/Transcencode.csproj' `
+            --configuration Release `
+            --runtime win-x64 `
+            --no-self-contained
+
+      - name: Commit only after compile and parser tests pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Canonical normalizer and source are already materialized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            transcencode-cli/tools/Normalize-CliSourceV2.py \
+            transcencode-cli/src/Transcencode/HandBrakeCliService.cs \
+            transcencode-cli/src/Transcencode/HandBrakeCommandBuilder.cs \
+            transcencode-cli/src/Transcencode/MainWindow.xaml.cs \
+            transcencode-cli/src/Transcencode/Models.cs \
+            transcencode-cli/src/Transcencode/SelfTestRunner.cs \
+            transcencode-cli/tests/Transcencode.CommandTests/Transcencode.CommandTests.csproj \
+            transcencode-cli/tests/Transcencode.CommandTests/Program.cs
+          git commit -m 'Adopt canonical CLI source normalization and manual ETA parsing'
+          git push origin HEAD:transcencode/cli-stable
