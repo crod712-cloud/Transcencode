@@ -31,6 +31,22 @@ if ($count -ne 1) {
 $text = $text.Replace($old, $new)
 [System.IO.File]::WriteAllText($pictureViewModelPath, $text, [System.Text.UTF8Encoding]::new($true))
 
+# Applying an Analyze recommendation must update HandBrake's real Video view-model,
+# not merely mutate the shared task and hope every quality binding notices.
+$analyzeViewModelPath = Join-Path $source 'win/CS/HandBrakeWPF/ViewModels/TranscencodeAnalyzeViewModel.cs'
+if (-not (Test-Path $analyzeViewModelPath)) {
+    throw 'TranscencodeAnalyzeViewModel.cs was not found.'
+}
+$analyzeCode = [System.IO.File]::ReadAllText($analyzeViewModelPath)
+$oldRefresh = '            this.videoViewModel.RefreshTask();'
+$newRefresh = '            this.videoViewModel.UpdateTask(this.task);'
+$refreshCount = ([System.Text.RegularExpressions.Regex]::Matches($analyzeCode, [System.Text.RegularExpressions.Regex]::Escape($oldRefresh))).Count
+if ($refreshCount -ne 1) {
+    throw "Expected exactly one Analyze recommendation refresh anchor, found $refreshCount."
+}
+$analyzeCode = $analyzeCode.Replace($oldRefresh, $newRefresh)
+[System.IO.File]::WriteAllText($analyzeViewModelPath, $analyzeCode, [System.Text.UTF8Encoding]::new($true))
+
 # The native window must remain usable when a saved scale file is malformed or read-only.
 $shellCodePath = Join-Path $source 'win/CS/HandBrakeWPF/Views/ShellView.xaml.cs'
 $shellCode = [System.IO.File]::ReadAllText($shellCodePath)
@@ -44,4 +60,4 @@ foreach ($required in @(
     }
 }
 
-Write-Host 'Transcencode hardening V2 applied: Same as source is first and scaling guards are verified.'
+Write-Host 'Transcencode hardening V2 applied: Same as source is first, Analyze updates the real Video model, and scaling guards are verified.'
