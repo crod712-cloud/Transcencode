@@ -60,4 +60,48 @@ foreach ($required in @(
     }
 }
 
-Write-Host 'Transcencode hardening V2 applied: Same as source is first, Analyze updates the real Video model, and scaling guards are verified.'
+# Add a hidden in-process self-test entry point. This executes against the actual App,
+# ShellView, MainViewModel, source scan, native Transcencode view-models, and WPF tree.
+$appPath = Join-Path $source 'win/CS/HandBrakeWPF/App.xaml.cs'
+if (-not (Test-Path $appPath)) {
+    throw 'App.xaml.cs was not found.'
+}
+$appCode = [System.IO.File]::ReadAllText($appPath)
+$appAnchor = @'
+            // If we have a file dropped on the icon, try scanning it.
+            string[] args = e.Args;
+            if (args.Any() && (File.Exists(args[0]) || Directory.Exists(args[0])))
+            {
+                IMainViewModel mvm = IoCHelper.Get<IMainViewModel>();
+                mvm.StartScan(new List<string> { args[0] }, 0);
+            }
+'@
+$appReplacement = @'
+            // If we have a file dropped on the icon, try scanning it.
+            string[] args = e.Args;
+            if (args.Any() && (File.Exists(args[0]) || Directory.Exists(args[0])))
+            {
+                IMainViewModel mvm = IoCHelper.Get<IMainViewModel>();
+                mvm.StartScan(new List<string> { args[0] }, 0);
+            }
+
+            const string selfTestPrefix = "--transcencode-self-test-report=";
+            string selfTestArgument = e.Args.FirstOrDefault(
+                item => item.StartsWith(selfTestPrefix, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(selfTestArgument))
+            {
+                string selfTestReportPath = selfTestArgument
+                    .Substring(selfTestPrefix.Length)
+                    .Trim()
+                    .Trim('"');
+                TranscencodeSelfTestRunner.Schedule(selfTestReportPath);
+            }
+'@
+$appCount = ([System.Text.RegularExpressions.Regex]::Matches($appCode, [System.Text.RegularExpressions.Regex]::Escape($appAnchor))).Count
+if ($appCount -ne 1) {
+    throw "Expected exactly one App self-test anchor, found $appCount."
+}
+$appCode = $appCode.Replace($appAnchor, $appReplacement)
+[System.IO.File]::WriteAllText($appPath, $appCode, [System.Text.UTF8Encoding]::new($true))
+
+Write-Host 'Transcencode hardening V2 applied: Same as source is first, Analyze updates the real Video model, scaling guards are verified, and the in-process native self-test is enabled.'
