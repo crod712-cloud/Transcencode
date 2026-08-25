@@ -1,0 +1,181 @@
+name: Transcencode Hardened Native WPF
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/native-wpf-alpha"
+    paths:
+      - "transcencode/hardening/**"
+      - "transcencode/hardening-overlay/**"
+      - ".github/workflows/transcencode-hardened-wpf.yml"
+      - "transcencode/bootstrap/native-wpf-alpha.tar.xz"
+
+concurrency:
+  group: transcencode-hardened-wpf-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build_and_smoke:
+    name: Compile and smoke-test hardened native WPF GUI
+    runs-on: windows-2022
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Apply native Transcencode GUI and hardening patches
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path '.transcencode-bootstrap' -Force | Out-Null
+          tar -xJf 'transcencode/bootstrap/native-wpf-alpha.tar.xz' -C '.transcencode-bootstrap'
+          & '.transcencode-bootstrap/transcencode/patch/Apply-TranscencodePatch.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path '.transcencode-bootstrap/transcencode/overlay')
+          & 'transcencode/hardening/Apply-TranscencodeHardening.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path 'transcencode/hardening-overlay')
+
+      - name: Validate patched XAML before compilation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $paths = @(
+            'win/CS/HandBrakeWPF/Views/ShellView.xaml',
+            'win/CS/HandBrakeWPF/Views/PictureSettingsView.xaml',
+            'win/CS/HandBrakeWPF/Views/VideoView.xaml'
+          )
+          foreach ($path in $paths) {
+            [xml](Get-Content $path -Raw) | Out-Null
+          }
+          $shell = Get-Content 'win/CS/HandBrakeWPF/Views/ShellView.xaml' -Raw
+          if ($shell -notmatch 'Interface size') { throw 'Interface scaling control was not applied.' }
+          $picture = Get-Content 'win/CS/HandBrakeWPF/Views/PictureSettingsView.xaml' -Raw
+          if ($picture -notmatch 'TranscencodeCropModeConverter') { throw 'Plain-language crop converter was not applied.' }
+          $video = Get-Content 'win/CS/HandBrakeWPF/Views/VideoView.xaml' -Raw
+          if ($video -notmatch 'NVIDIA NVENC constant quality is not automatically lossless') { throw 'Quality guidance was not applied.' }
+
+      - name: Download verified HandBrake runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Path '.handbrake-runtime' -Force | Out-Null
+          $lib = '.handbrake-runtime/LibHB.zip'
+          $cli = '.handbrake-runtime/HandBrakeCLI.zip'
+          Invoke-WebRequest 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/LibHB-1.11.2-win-x86_64.zip' -OutFile $lib
+          Invoke-WebRequest 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/HandBrakeCLI-1.11.2-win-x86_64.zip' -OutFile $cli
+          if ((Get-FileHash $lib -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'd9bd679822f2c313f4918e7833eb2f57a9d2ceeb7ed0152343bc99c9cb44bdb0') { throw 'LibHB checksum mismatch.' }
+          if ((Get-FileHash $cli -Algorithm SHA256).Hash.ToLowerInvariant() -ne '80bfe8d5f5d11cc3ef76b834add3ed4e82dee6523ffeb435c283f88b1a21f09d') { throw 'HandBrakeCLI checksum mismatch.' }
+          Expand-Archive $lib '.handbrake-runtime/libhb' -Force
+          Expand-Archive $cli '.handbrake-runtime/cli' -Force
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish WPF GUI and worker
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish 'win/CS/HandBrakeWPF/HandBrakeWPF.csproj' -p:PublishProfile=publish_x64
+          dotnet publish 'win/CS/HandBrake.Worker/HandBrake.Worker.csproj' -p:PublishProfile=publish_x64
+
+          $publish = 'win/CS/HandBrakeWPF/bin/publish'
+          Copy-Item 'win/CS/HandBrake.Worker/bin/publish/*' $publish -Recurse -Force
+          $hbDll = Get-ChildItem '.handbrake-runtime/libhb' -Filter hb.dll -Recurse | Select-Object -First 1
+          $cli = Get-ChildItem '.handbrake-runtime/cli' -Filter HandBrakeCLI.exe -Recurse | Select-Object -First 1
+          if ($null -eq $hbDll -or $null -eq $cli) { throw 'Runtime archive contents were incomplete.' }
+          Copy-Item $hbDll.FullName (Join-Path $publish 'hb.dll') -Force
+          Copy-Item $cli.FullName (Join-Path $publish 'HandBrakeCLI.exe') -Force
+
+      - name: Launch UI and verify scale and native tabs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          New-Item -ItemType Directory -Path 'smoke/AppData','smoke/LocalAppData','smoke/diagnostics' -Force | Out-Null
+          $env:APPDATA = (Resolve-Path 'smoke/AppData').Path
+          $env:LOCALAPPDATA = (Resolve-Path 'smoke/LocalAppData').Path
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+
+          $process = Start-Process (Join-Path $publish 'HandBrake.exe') -WorkingDirectory $publish -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+              Start-Sleep -Milliseconds 500
+              $process.Refresh()
+              if ($process.HasExited) { throw "Application exited during startup: $($process.ExitCode)" }
+            } while ($process.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $deadline)
+            if ($process.MainWindowHandle -eq 0) { throw 'Application did not open a main window.' }
+
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+            if ($root.Current.Name -notmatch '(?i)Transcencode') { throw "Unexpected window title: $($root.Current.Name)" }
+
+            $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+            $names = foreach ($element in $all) {
+              if (-not [string]::IsNullOrWhiteSpace($element.Current.Name)) { $element.Current.Name }
+            }
+            $names | Sort-Object -Unique | Set-Content 'smoke/diagnostics/automation-names.txt' -Encoding UTF8
+
+            foreach ($required in @('Analyze','Source Tracks','Upscale & Enhance','Verify','Live Engine','Interface size','100%','125%','150%')) {
+              if ($names -notcontains $required) { throw "Required UI element was not found: $required" }
+            }
+
+            $comboCondition = New-Object System.Windows.Automation.AndCondition(
+              (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::ComboBox)),
+              (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,'Interface size')))
+            $scaleCombo = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $comboCondition)
+            if ($null -eq $scaleCombo) {
+              # Some WPF templates expose the label separately and leave the combo unnamed. Confirm the picker through its items instead.
+              $comboOnly = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::ComboBox)
+              $combos = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $comboOnly)
+              if ($combos.Count -lt 1) { throw 'No interface scaling ComboBox was exposed to UI Automation.' }
+            }
+
+            Start-Sleep -Seconds 5
+            $process.Refresh()
+            if ($process.HasExited) { throw "Application crashed after startup: $($process.ExitCode)" }
+          }
+          finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: Stage hardened portable build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'artifacts/Transcencode-Hardened' -Force | Out-Null
+          Copy-Item 'win/CS/HandBrakeWPF/bin/publish/*' 'artifacts/Transcencode-Hardened' -Recurse -Force
+          @"
+          Transcencode native WPF hardening build
+          Analyze. Encode. Verify.
+
+          Added in this build:
+          - plain-language black-bar behavior, including Same as source
+          - explicit NVENC quality guidance
+          - whole-interface scaling from 100% through 200%
+          - scrollable enlarged interface
+          "@ | Set-Content 'artifacts/Transcencode-Hardened/TRANSCENCODE-HARDENING.txt' -Encoding UTF8
+          Compress-Archive 'artifacts/Transcencode-Hardened' 'artifacts/Transcencode-Hardened-Windows-x64.zip' -Force
+
+      - name: Upload hardened build
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Hardened-Windows-x64
+          path: artifacts/Transcencode-Hardened-Windows-x64.zip
+          if-no-files-found: error
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Hardened-Diagnostics
+          path: smoke/diagnostics
+          if-no-files-found: warn
