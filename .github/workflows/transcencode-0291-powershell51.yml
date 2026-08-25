@@ -1,0 +1,28 @@
+name: Transcencode 0.2.9.1 PowerShell 5.1 Hotfix Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/cli-0.2.9.1-hotfix-validation"
+
+permissions:
+  contents: read
+
+jobs:
+  powershell51:
+    name: Parse and execute corrected interpolation on Windows PowerShell 5.1
+    runs-on: windows-2022
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run exact parser regression
+        shell: powershell
+        run: |
+          $PSVersionTable | Format-List | Out-String | Write-Host
+          & '.\hotfix-validation\Test-DeepAnalysis-0291.ps1'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Hotfix test exited with code $LASTEXITCODE"
+          }
