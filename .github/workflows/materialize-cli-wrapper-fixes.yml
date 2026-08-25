@@ -1,0 +1,106 @@
+name: Materialize Transcencode CLI Wrapper Fixes
+
+on:
+  push:
+    branches:
+      - "transcencode/cli-wrapper-stable"
+    paths:
+      - ".github/workflows/materialize-cli-wrapper-fixes.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: windows-2022
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: transcencode/cli-wrapper-stable
+          fetch-depth: 0
+
+      - name: Apply deterministic source and Windows-smoke corrections
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          from pathlib import Path
+
+          def replace(path_text: str, old: str, new: str, description: str) -> None:
+              path = Path(path_text)
+              text = path.read_text(encoding="utf-8-sig")
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{description}: expected one anchor in {path}, found {count}")
+              path.write_text(text.replace(old, new), encoding="utf-8")
+
+          replace(
+              "transcencode/cli-wrapper/src/Transcencode.CliGui/Transcencode.CliGui.csproj",
+              "    <ApplicationIcon>Transcencode.ico</ApplicationIcon>\n",
+              "",
+              "remove nonexistent icon dependency")
+
+          replace(
+              "transcencode/cli-wrapper/src/Transcencode.CliGui/app.manifest",
+              '<dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">PerMonitorV2</dpiAware>',
+              '<dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>',
+              "correct legacy DPI manifest value")
+
+          replace(
+              "transcencode/cli-wrapper/src/Transcencode.CliGui/CompilerCompatibility.cs",
+              "            return dispatcher.BeginInvoke(action, DispatcherPriority.Normal);",
+              "            return dispatcher.BeginInvoke(DispatcherPriority.Normal, action);",
+              "use the stable WPF Dispatcher overload")
+
+          replace(
+              "transcencode/cli-wrapper/src/Transcencode.CliGui/MediaAnalysisService.cs",
+              "Cv2.Compare(gray, new Scalar(40), darkMask, CmpType.LT);",
+              "Cv2.Compare(gray, new Scalar(40), darkMask, CmpTypes.LT);",
+              "use the OpenCvSharp comparison enum")
+
+          replace(
+              "transcencode/cli-wrapper/src/Transcencode.CliGui/MainWindow.xaml.cs",
+              "            Dispatcher.BeginInvoke(() => AppendConsole(text));",
+              "            Dispatcher.BeginInvoke(new Action(() => AppendConsole(text)));",
+              "marshal console output with an explicit Action")
+
+          replace(
+              "transcencode/cli-wrapper/src/Transcencode.CliGui/MainWindow.xaml.cs",
+              "                progress => Dispatcher.BeginInvoke(() => ApplyEngineProgress(progress)),",
+              "                progress => Dispatcher.BeginInvoke(new Action(() => ApplyEngineProgress(progress))),",
+              "marshal engine progress with an explicit Action")
+
+          replace(
+              ".github/workflows/transcencode-cli-wrapper.yml",
+              "            -c:a aac -b:a 128k -c:s srt -shortest `\n            'artifacts/smoke/source.mkv'",
+              "            -c:a aac -b:a 128k -c:s srt -t 12 `\n            'artifacts/smoke/source.mkv'",
+              "keep the multilingual regression source longer than HandBrake's minimum title duration")
+          '@ | Set-Content apply_cli_fixes.py -Encoding UTF8
+
+          python apply_cli_fixes.py
+          Remove-Item apply_cli_fixes.py -Force
+
+          git diff --check
+          git diff --stat
+
+      - name: Commit materialized corrections
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- `
+            '.github/workflows/transcencode-cli-wrapper.yml' `
+            'transcencode/cli-wrapper/src/Transcencode.CliGui/Transcencode.CliGui.csproj' `
+            'transcencode/cli-wrapper/src/Transcencode.CliGui/app.manifest' `
+            'transcencode/cli-wrapper/src/Transcencode.CliGui/CompilerCompatibility.cs' `
+            'transcencode/cli-wrapper/src/Transcencode.CliGui/MediaAnalysisService.cs' `
+            'transcencode/cli-wrapper/src/Transcencode.CliGui/MainWindow.xaml.cs'
+          if (git diff --cached --quiet) {
+            Write-Host 'All materialized corrections were already present.'
+            exit 0
+          }
+          git commit -m 'Fix CLI wrapper Windows compilation and end-to-end smoke source'
+          git push origin HEAD:transcencode/cli-wrapper-stable
