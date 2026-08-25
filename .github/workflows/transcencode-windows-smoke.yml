@@ -1,0 +1,259 @@
+name: Transcencode Windows Runtime Smoke Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/native-wpf-alpha"
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: transcencode-windows-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  runtime_smoke:
+    name: Compile, launch, inspect UI, and encode test media
+    runs-on: windows-2022
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Expand and apply native Transcencode WPF patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path '.transcencode-bootstrap' -Force | Out-Null
+          tar -xJf 'transcencode/bootstrap/native-wpf-alpha.tar.xz' -C '.transcencode-bootstrap'
+          & '.transcencode-bootstrap/transcencode/patch/Apply-TranscencodePatch.ps1' `
+            -SourceRoot (Get-Location).Path `
+            -OverlayRoot (Join-Path (Get-Location).Path '.transcencode-bootstrap/transcencode/overlay')
+
+      - name: Download and verify official HandBrake runtime files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Path '.handbrake-runtime' -Force | Out-Null
+
+          $libArchive = '.handbrake-runtime/LibHB-1.11.2-win-x86_64.zip'
+          $cliArchive = '.handbrake-runtime/HandBrakeCLI-1.11.2-win-x86_64.zip'
+          Invoke-WebRequest -Uri 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/LibHB-1.11.2-win-x86_64.zip' -OutFile $libArchive
+          Invoke-WebRequest -Uri 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/HandBrakeCLI-1.11.2-win-x86_64.zip' -OutFile $cliArchive
+
+          $libHash = (Get-FileHash $libArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $cliHash = (Get-FileHash $cliArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($libHash -ne 'd9bd679822f2c313f4918e7833eb2f57a9d2ceeb7ed0152343bc99c9cb44bdb0') {
+            throw "LibHB checksum mismatch: $libHash"
+          }
+          if ($cliHash -ne '80bfe8d5f5d11cc3ef76b834add3ed4e82dee6523ffeb435c283f88b1a21f09d') {
+            throw "HandBrakeCLI checksum mismatch: $cliHash"
+          }
+
+          Expand-Archive -LiteralPath $libArchive -DestinationPath '.handbrake-runtime/libhb' -Force
+          Expand-Archive -LiteralPath $cliArchive -DestinationPath '.handbrake-runtime/cli' -Force
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish patched WPF GUI and worker
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish 'win/CS/HandBrakeWPF/HandBrakeWPF.csproj' -p:PublishProfile=publish_x64
+          dotnet publish 'win/CS/HandBrake.Worker/HandBrake.Worker.csproj' -p:PublishProfile=publish_x64
+
+          $publish = 'win/CS/HandBrakeWPF/bin/publish'
+          $worker = 'win/CS/HandBrake.Worker/bin/publish'
+          Copy-Item "$worker/*" $publish -Recurse -Force
+
+          $hbDll = Get-ChildItem '.handbrake-runtime/libhb' -Filter 'hb.dll' -Recurse | Select-Object -First 1
+          $cli = Get-ChildItem '.handbrake-runtime/cli' -Filter 'HandBrakeCLI.exe' -Recurse | Select-Object -First 1
+          if ($null -eq $hbDll) { throw 'Verified LibHB archive did not contain hb.dll.' }
+          if ($null -eq $cli) { throw 'Verified CLI archive did not contain HandBrakeCLI.exe.' }
+          Copy-Item $hbDll.FullName (Join-Path $publish 'hb.dll') -Force
+          Copy-Item $cli.FullName (Join-Path $publish 'HandBrakeCLI.exe') -Force
+
+      - name: Create multi-track regression source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          }
+
+          New-Item -ItemType Directory -Path 'smoke' -Force | Out-Null
+          @"
+          1
+          00:00:00,000 --> 00:00:01,500
+          English subtitle smoke test
+          "@ | Set-Content 'smoke/en.srt' -Encoding UTF8
+          @"
+          1
+          00:00:00,000 --> 00:00:01,500
+          Prueba de subtitulos en espanol
+          "@ | Set-Content 'smoke/es.srt' -Encoding UTF8
+
+          ffmpeg -hide_banner -loglevel error -y `
+            -f lavfi -i 'testsrc2=size=1280x720:rate=30:duration=5' `
+            -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=5' `
+            -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=5' `
+            -i 'smoke/en.srt' -i 'smoke/es.srt' `
+            -map 0:v:0 -map 1:a:0 -map 2:a:0 -map 3:s:0 -map 4:s:0 `
+            -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p `
+            -c:a aac -b:a 128k -c:s srt `
+            -metadata:s:a:0 language=eng -metadata:s:a:0 title='English Test' `
+            -metadata:s:a:1 language=spa -metadata:s:a:1 title='Spanish Test' `
+            -metadata:s:s:0 language=eng -metadata:s:s:0 title='English Test' `
+            -metadata:s:s:1 language=spa -metadata:s:s:1 title='Spanish Test' `
+            'smoke/source.mkv'
+
+          if (-not (Test-Path 'smoke/source.mkv')) { throw 'ffmpeg did not create the regression source.' }
+
+      - name: Validate CLI scan, track discovery, crop preservation, and encode
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+          $cli = Join-Path $publish 'HandBrakeCLI.exe'
+
+          & $cli --scan -i 'smoke/source.mkv' 2>&1 | Tee-Object -FilePath 'smoke/source-scan.txt'
+          $scan = Get-Content 'smoke/source-scan.txt' -Raw
+          if ($LASTEXITCODE -ne 0) { throw "HandBrakeCLI source scan failed with exit code $LASTEXITCODE." }
+          if ($scan -notmatch '(?i)English|eng') { throw 'Source scan did not expose the English track metadata.' }
+          if ($scan -notmatch '(?i)Spanish|spa') { throw 'Source scan did not expose the Spanish track metadata.' }
+
+          & $cli -i 'smoke/source.mkv' -o 'smoke/output.mkv' `
+            -e x264 -q 22 --encoder-preset veryfast `
+            --crop-mode none --all-audio --all-subtitles 2>&1 | Tee-Object -FilePath 'smoke/encode.txt'
+          if ($LASTEXITCODE -ne 0) { throw "Regression encode failed with exit code $LASTEXITCODE." }
+          if (-not (Test-Path 'smoke/output.mkv')) { throw 'Regression encode did not create output.mkv.' }
+
+          & $cli --scan -i 'smoke/output.mkv' 2>&1 | Tee-Object -FilePath 'smoke/output-scan.txt'
+          $outputScan = Get-Content 'smoke/output-scan.txt' -Raw
+          if ($LASTEXITCODE -ne 0) { throw "Output scan failed with exit code $LASTEXITCODE." }
+          if ($outputScan -notmatch '1280x720') { throw 'Same-as-source crop regression: output did not remain 1280x720.' }
+
+          $audioMatches = [regex]::Matches($outputScan, '(?im)^\s*\+.*audio')
+          $subtitleMatches = [regex]::Matches($outputScan, '(?im)^\s*\+.*subtitle')
+          if ($audioMatches.Count -lt 2 -and $outputScan -notmatch '(?s)audio tracks:.*?1.*?2') {
+            throw 'Output scan did not show both audio tracks.'
+          }
+          if ($subtitleMatches.Count -lt 2 -and $outputScan -notmatch '(?s)subtitle tracks:.*?1.*?2') {
+            throw 'Output scan did not show both subtitle tracks.'
+          }
+
+      - name: Launch GUI and inspect native tab accessibility tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+          $appData = (Resolve-Path 'smoke').Path + '\AppData'
+          $localAppData = (Resolve-Path 'smoke').Path + '\LocalAppData'
+          New-Item -ItemType Directory -Path $appData,$localAppData -Force | Out-Null
+
+          $oldAppData = $env:APPDATA
+          $oldLocalAppData = $env:LOCALAPPDATA
+          $env:APPDATA = $appData
+          $env:LOCALAPPDATA = $localAppData
+
+          $process = $null
+          try {
+            $process = Start-Process -FilePath (Join-Path $publish 'HandBrake.exe') -WorkingDirectory $publish -PassThru
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+              Start-Sleep -Milliseconds 500
+              $process.Refresh()
+              if ($process.HasExited) {
+                throw "Transcencode exited during startup with code $($process.ExitCode)."
+              }
+            } while ($process.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $deadline)
+
+            if ($process.MainWindowHandle -eq 0) {
+              throw 'Transcencode did not create a main window within 30 seconds.'
+            }
+
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+            if ($null -eq $root) { throw 'UI Automation could not attach to the Transcencode main window.' }
+
+            $condition = New-Object System.Windows.Automation.PropertyCondition(
+              [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+              [System.Windows.Automation.ControlType]::TabItem)
+            $tabItems = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
+            $names = @()
+            foreach ($tab in $tabItems) {
+              if (-not [string]::IsNullOrWhiteSpace($tab.Current.Name)) { $names += $tab.Current.Name }
+            }
+            $names | Sort-Object -Unique | Set-Content 'smoke/ui-tabs.txt' -Encoding UTF8
+
+            $required = @('Summary','Dimensions','Filters','Video','Audio','Subtitles','Chapters','Analyze','Source Tracks','Upscale & Enhance','Verify','Live Engine')
+            $missing = @($required | Where-Object { $names -notcontains $_ })
+            if ($missing.Count -gt 0) {
+              throw "Native UI tab smoke test failed. Missing: $($missing -join ', '). Found: $($names -join ', ')"
+            }
+
+            if ($root.Current.Name -notmatch '(?i)Transcencode') {
+              throw "Main window title is not branded Transcencode. Actual title: '$($root.Current.Name)'"
+            }
+
+            Start-Sleep -Seconds 5
+            $process.Refresh()
+            if ($process.HasExited) { throw "Transcencode crashed after UI discovery with code $($process.ExitCode)." }
+          }
+          finally {
+            if ($null -ne $process -and -not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+            $env:APPDATA = $oldAppData
+            $env:LOCALAPPDATA = $oldLocalAppData
+          }
+
+      - name: Fail on crash signatures and collect diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Path 'smoke/diagnostics' -Force | Out-Null
+          Get-ChildItem 'smoke' -Recurse -File | ForEach-Object {
+            if ($_.Length -lt 20MB) { Copy-Item $_.FullName 'smoke/diagnostics' -Force }
+          }
+
+          $logRoots = @(
+            (Join-Path (Resolve-Path 'smoke').Path 'AppData\HandBrake'),
+            (Join-Path (Resolve-Path 'smoke').Path 'LocalAppData\HandBrake'),
+            (Join-Path (Resolve-Path 'smoke').Path 'AppData\Transcencode'),
+            (Join-Path (Resolve-Path 'smoke').Path 'LocalAppData\Transcencode')
+          )
+          foreach ($root in $logRoots) {
+            if (Test-Path $root) {
+              Copy-Item $root 'smoke/diagnostics' -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          $textFiles = Get-ChildItem 'smoke/diagnostics' -Recurse -File -Include '*.txt','*.log','*.json' -ErrorAction SilentlyContinue
+          foreach ($file in $textFiles) {
+            $text = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+            if ($text -match '(?i)unhandled exception|access violation|fatal error|stack overflow') {
+              Write-Error "Crash signature found in $($file.FullName)"
+            }
+          }
+
+      - name: Upload smoke-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Transcencode-Windows-Smoke-Diagnostics
+          path: smoke/diagnostics
+          if-no-files-found: warn
