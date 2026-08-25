@@ -23,4 +23,4 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSVersionTable | Format-List | Out-String | Write-Host
-          & '.\hotfix-validation\Test-InstallerLock-0292.ps1'
+          & '.\hotfix-validation\Test-InstallerLock-0292-v3.ps1'
