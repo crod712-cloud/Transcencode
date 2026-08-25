@@ -1,0 +1,71 @@
+name: Materialize Transcencode CLI Source V2
+
+on:
+  push:
+    branches:
+      - "transcencode/cli-stable"
+    paths:
+      - "transcencode-cli/tools/Normalize-CliSourceV2.py"
+      - ".github/workflows/materialize-cli-source-v2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-transcencode-cli-source-v2
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: transcencode/cli-stable
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Normalize the checked-in source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python 'transcencode-cli/tools/Normalize-CliSourceV2.py'
+
+      - name: Compile and run command/parser tests before committing
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run `
+            --project 'transcencode-cli/tests/Transcencode.CommandTests/Transcencode.CommandTests.csproj' `
+            --configuration Release
+          dotnet build `
+            'transcencode-cli/src/Transcencode/Transcencode.csproj' `
+            --configuration Release `
+            --runtime win-x64 `
+            --no-self-contained
+
+      - name: Commit only compile-checked source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Source was already normalized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            transcencode-cli/src/Transcencode/HandBrakeCliService.cs \
+            transcencode-cli/src/Transcencode/HandBrakeCommandBuilder.cs \
+            transcencode-cli/src/Transcencode/MainWindow.xaml.cs \
+            transcencode-cli/src/Transcencode/Models.cs \
+            transcencode-cli/src/Transcencode/SelfTestRunner.cs \
+            transcencode-cli/tests/Transcencode.CommandTests/Transcencode.CommandTests.csproj \
+            transcencode-cli/tests/Transcencode.CommandTests/Program.cs
+          git commit -m 'Harden CLI scanning, progress, command construction, and tests'
+          git push origin HEAD:transcencode/cli-stable
