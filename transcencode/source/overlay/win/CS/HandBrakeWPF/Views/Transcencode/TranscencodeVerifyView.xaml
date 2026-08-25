@@ -1,0 +1,45 @@
+<UserControl x:Class="HandBrakeWPF.Views.TranscencodeVerifyView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinWidth="720" MinHeight="430">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" BorderBrush="#6E7781" BorderThickness="1" CornerRadius="4" Padding="12" Margin="0,0,0,10">
+            <StackPanel>
+                <TextBlock Text="Verify Output" FontSize="18" FontWeight="SemiBold"/>
+                <TextBlock Margin="0,4,0,0" TextWrapping="Wrap"
+                           Text="After encoding, this uses the packaged HandBrakeCLI to reopen the result and verify that it is readable, has title data, reports a duration and resolution, and exposes its audio and subtitle track counts."/>
+                <TextBlock Margin="0,5,0,0" Foreground="DimGray" TextWrapping="Wrap"
+                           Text="This is structural verification. Frame-by-frame visual-quality proof and audio-sync measurement are later verification stages and are not claimed in this milestone."/>
+            </StackPanel>
+        </Border>
+
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Button Grid.Column="0" Content="Verify Output" Command="{Binding VerifyCommand}" Padding="16,7"/>
+            <StackPanel Grid.Column="1" Margin="12,0,0,0">
+                <TextBlock Text="{Binding OutputPath}" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+            </StackPanel>
+        </Grid>
+
+        <TextBlock Grid.Row="2" Text="PASS means the structural check succeeded. REVIEW means the result needs attention; it does not automatically mean the file is unusable." TextWrapping="Wrap" Foreground="DimGray" Margin="0,0,0,8"/>
+
+        <DataGrid Grid.Row="3" ItemsSource="{Binding Results}" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Check" Binding="{Binding Check}" Width="170"/>
+                <DataGridTextColumn Header="Result" Binding="{Binding Result}" Width="90"/>
+                <DataGridTextColumn Header="Details" Binding="{Binding Details}" Width="*"/>
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</UserControl>

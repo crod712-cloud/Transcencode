@@ -1,0 +1,47 @@
+<UserControl x:Class="HandBrakeWPF.Views.TranscencodeSourceTracksView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinWidth="720" MinHeight="430">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" BorderBrush="#6E7781" BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,0,0,10">
+            <StackPanel>
+                <TextBlock Text="Available Source Tracks" FontSize="18" FontWeight="SemiBold"/>
+                <TextBlock Text="{Binding Summary}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+            </StackPanel>
+        </Border>
+
+        <GroupBox Grid.Row="1" Header="Audio tracks" Margin="0,0,0,8">
+            <DataGrid ItemsSource="{Binding AudioTracks}" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="#" Binding="{Binding Track}" Width="40"/>
+                    <DataGridTextColumn Header="Language" Binding="{Binding Language}" Width="120"/>
+                    <DataGridTextColumn Header="Code" Binding="{Binding Code}" Width="70"/>
+                    <DataGridTextColumn Header="Codec / description" Binding="{Binding Codec}" Width="*"/>
+                    <DataGridTextColumn Header="Channels" Binding="{Binding Channels}" Width="130"/>
+                    <DataGridTextColumn Header="Bitrate" Binding="{Binding Bitrate}" Width="100"/>
+                    <DataGridTextColumn Header="Sample rate" Binding="{Binding SampleRate}" Width="100"/>
+                    <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="150"/>
+                </DataGrid.Columns>
+            </DataGrid>
+        </GroupBox>
+
+        <GroupBox Grid.Row="2" Header="Subtitle tracks">
+            <DataGrid ItemsSource="{Binding SubtitleTracks}" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="#" Binding="{Binding Track}" Width="40"/>
+                    <DataGridTextColumn Header="Language" Binding="{Binding Language}" Width="130"/>
+                    <DataGridTextColumn Header="Code" Binding="{Binding Code}" Width="70"/>
+                    <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="150"/>
+                    <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*"/>
+                    <DataGridTextColumn Header="What HandBrake can do" Binding="{Binding Capabilities}" Width="220"/>
+                </DataGrid.Columns>
+            </DataGrid>
+        </GroupBox>
+    </Grid>
+</UserControl>
