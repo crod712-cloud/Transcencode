@@ -1,0 +1,185 @@
+name: Transcencode CLI-backed Windows GUI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/cli-wrapper-fix"
+    paths:
+      - "bootstrap/**"
+      - "cli-wrapper/**"
+      - ".github/workflows/transcencode-cli-wrapper-windows.yml"
+  pull_request:
+    branches:
+      - master
+    paths:
+      - "bootstrap/**"
+      - "cli-wrapper/**"
+      - ".github/workflows/transcencode-cli-wrapper-windows.yml"
+
+concurrency:
+  group: transcencode-cli-wrapper-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build_installer:
+    name: Build and statically validate installer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Expand bootstrap source when needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f cli-wrapper/build.sh ]]; then
+            test -f bootstrap/Transcencode-0.2.10-cli-source.zip
+            mkdir -p cli-wrapper
+            unzip -q bootstrap/Transcencode-0.2.10-cli-source.zip -d cli-wrapper
+          fi
+          test -f cli-wrapper/build.sh
+          test -f cli-wrapper/tests/Windows-Wrapper-Smoke.ps1
+
+      - name: Install cross-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld binutils file python3
+
+      - name: Build native Windows GUI launcher and installer
+        working-directory: cli-wrapper
+        run: |
+          chmod +x build.sh
+          ./build.sh | tee build.log
+
+      - name: Upload built installer and static report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transcencode-CLI-Wrapper-Build
+          path: |
+            cli-wrapper/out/Transcencode-Setup-x64-0.2.10.exe
+            cli-wrapper/out/validation.json
+            cli-wrapper/build.log
+          if-no-files-found: error
+
+  windows_runtime:
+    name: Install, launch, scan, encode, and prove no console window
+    needs: build_installer
+    runs-on: windows-2022
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out tests
+        uses: actions/checkout@v4
+
+      - name: Expand bootstrap source when needed
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path '.\cli-wrapper\tests\Windows-Wrapper-Smoke.ps1')) {
+            if (-not (Test-Path '.\bootstrap\Transcencode-0.2.10-cli-source.zip')) {
+              throw 'Neither materialized CLI-wrapper source nor the bootstrap archive exists.'
+            }
+            New-Item -ItemType Directory -Path '.\cli-wrapper' -Force | Out-Null
+            Expand-Archive -LiteralPath '.\bootstrap\Transcencode-0.2.10-cli-source.zip' -DestinationPath '.\cli-wrapper' -Force
+          }
+          if (-not (Test-Path '.\cli-wrapper\tests\Windows-Wrapper-Smoke.ps1')) {
+            throw 'Windows smoke-test script was not materialized.'
+          }
+
+      - name: Download built installer
+        uses: actions/download-artifact@v4
+        with:
+          name: Transcencode-CLI-Wrapper-Build
+          path: downloaded-build
+
+      - name: Install FFmpeg test dependency
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          }
+          ffmpeg -version | Select-Object -First 1
+
+      - name: Run installed Windows application end to end
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & '.\cli-wrapper\tests\Windows-Wrapper-Smoke.ps1' `
+            -InstallerPath '.\downloaded-build\Transcencode-Setup-x64-0.2.10.exe' `
+            -WorkRoot '.\windows-smoke'
+
+      - name: Stage runtime-tested candidate
+        if: success()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'tested-candidate' -Force | Out-Null
+          Copy-Item '.\downloaded-build\Transcencode-Setup-x64-0.2.10.exe' 'tested-candidate\Transcencode-Setup-x64-0.2.10.exe' -Force
+          Copy-Item '.\downloaded-build\validation.json' 'tested-candidate\static-validation.json' -Force
+          Copy-Item '.\windows-smoke\WINDOWS-SMOKE-PASSED.txt' 'tested-candidate\WINDOWS-SMOKE-PASSED.txt' -Force
+          Copy-Item '.\windows-smoke\installed-app-self-test.txt' 'tested-candidate\installed-app-self-test.txt' -Force
+          $hash = (Get-FileHash 'tested-candidate\Transcencode-Setup-x64-0.2.10.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Transcencode-Setup-x64-0.2.10.exe" | Set-Content 'tested-candidate\SHA256SUMS.txt' -Encoding ASCII
+
+      - name: Upload runtime-tested candidate
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transcencode-CLI-Wrapper-Windows-Tested-0.2.10
+          path: tested-candidate
+          if-no-files-found: error
+
+      - name: Upload runtime diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transcencode-CLI-Wrapper-Windows-Diagnostics
+          path: |
+            windows-smoke/diagnostics
+            windows-smoke/WINDOWS-SMOKE-PASSED.txt
+            windows-smoke/installed-app-self-test.txt
+          if-no-files-found: warn
+
+  materialize_source:
+    name: Materialize tested wrapper source in the branch
+    needs: windows_runtime
+    if: github.event_name == 'push' && github.ref_name == 'transcencode/cli-wrapper-fix'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tested branch
+        uses: actions/checkout@v4
+        with:
+          ref: transcencode/cli-wrapper-fix
+
+      - name: Replace bootstrap archive with readable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f bootstrap/Transcencode-0.2.10-cli-source.zip ]]; then
+            echo 'Bootstrap archive already materialized.'
+            exit 0
+          fi
+
+          rm -rf cli-wrapper
+          mkdir -p cli-wrapper
+          unzip -q bootstrap/Transcencode-0.2.10-cli-source.zip -d cli-wrapper
+          rm bootstrap/Transcencode-0.2.10-cli-source.zip
+          rmdir bootstrap 2>/dev/null || true
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add cli-wrapper bootstrap
+          git commit -m 'Materialize Windows-tested CLI wrapper source [skip ci]'
+          git push origin HEAD:transcencode/cli-wrapper-fix
