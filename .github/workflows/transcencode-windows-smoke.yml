@@ -90,6 +90,61 @@ jobs:
             }
           }
 
+      - name: Probe the real normal startup path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+          $smoke = Join-Path (Get-Location).Path 'smoke'
+          $appData = Join-Path $smoke 'NormalStartupAppData'
+          $localAppData = Join-Path $smoke 'NormalStartupLocalAppData'
+          $diagnostics = Join-Path $smoke 'NormalStartupDiagnostics'
+          New-Item -ItemType Directory -Path $appData,$localAppData,$diagnostics -Force | Out-Null
+
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = Join-Path $publish 'HandBrake.exe'
+          $startInfo.WorkingDirectory = $publish
+          $startInfo.UseShellExecute = $false
+          $startInfo.Environment['APPDATA'] = $appData
+          $startInfo.Environment['LOCALAPPDATA'] = $localAppData
+          $startInfo.Environment['TRANSCENCODE_DIAGNOSTIC_DIR'] = $diagnostics
+          [void]$startInfo.ArgumentList.Add('--no-hardware')
+
+          $process = [System.Diagnostics.Process]::Start($startInfo)
+          if ($null -eq $process) { throw 'Could not start the native Transcencode application.' }
+
+          try {
+            Start-Sleep -Seconds 15
+            $process.Refresh()
+
+            $errorReports = @(Get-ChildItem $diagnostics -File -ErrorAction SilentlyContinue)
+            if ($errorReports.Count -gt 0) {
+              foreach ($report in $errorReports) {
+                Write-Host "--- $($report.FullName) ---"
+                Get-Content $report.FullName -Raw | Write-Host
+              }
+              throw 'The real normal startup path produced a handled or unhandled error report.'
+            }
+
+            if ($process.HasExited) {
+              throw "The real normal startup path exited unexpectedly with code $($process.ExitCode)."
+            }
+
+            @"
+            TRANSCENCODE_NORMAL_STARTUP_PASSED
+            Process remained alive for 15 seconds.
+            No handled or unhandled startup report was written.
+            Settings root: $appData\Transcencode
+            Worker port: 8047
+            "@ | Set-Content (Join-Path $smoke 'NORMAL-STARTUP-PASSED.txt') -Encoding UTF8
+          }
+          finally {
+            if (-not $process.HasExited) {
+              $process.Kill($true)
+              $process.WaitForExit(10000) | Out-Null
+            }
+          }
+
       - name: Install ffmpeg test dependency
         shell: pwsh
         run: |
@@ -115,9 +170,10 @@ jobs:
           $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
           $source = (Resolve-Path 'smoke/source.mkv').Path
           $report = Join-Path (Resolve-Path 'smoke').Path 'NATIVE-WPF-SELF-TEST.txt'
-          $appData = Join-Path (Resolve-Path 'smoke').Path 'AppData'
-          $localAppData = Join-Path (Resolve-Path 'smoke').Path 'LocalAppData'
-          New-Item -ItemType Directory -Path $appData,$localAppData -Force | Out-Null
+          $appData = Join-Path (Resolve-Path 'smoke').Path 'SelfTestAppData'
+          $localAppData = Join-Path (Resolve-Path 'smoke').Path 'SelfTestLocalAppData'
+          $diagnostics = Join-Path (Resolve-Path 'smoke').Path 'SelfTestDiagnostics'
+          New-Item -ItemType Directory -Path $appData,$localAppData,$diagnostics -Force | Out-Null
 
           $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
           $startInfo.FileName = Join-Path $publish 'HandBrake.exe'
@@ -125,6 +181,7 @@ jobs:
           $startInfo.UseShellExecute = $false
           $startInfo.Environment['APPDATA'] = $appData
           $startInfo.Environment['LOCALAPPDATA'] = $localAppData
+          $startInfo.Environment['TRANSCENCODE_DIAGNOSTIC_DIR'] = $diagnostics
           [void]$startInfo.ArgumentList.Add($source)
           [void]$startInfo.ArgumentList.Add('--no-hardware')
           [void]$startInfo.ArgumentList.Add("--transcencode-self-test-report=$report")
@@ -134,6 +191,15 @@ jobs:
           if (-not $process.WaitForExit(240000)) {
             $process.Kill($true)
             throw 'The native Transcencode WPF self-test exceeded four minutes.'
+          }
+
+          $errorReports = @(Get-ChildItem $diagnostics -File -ErrorAction SilentlyContinue)
+          if ($errorReports.Count -gt 0) {
+            foreach ($errorReport in $errorReports) {
+              Write-Host "--- $($errorReport.FullName) ---"
+              Get-Content $errorReport.FullName -Raw | Write-Host
+            }
+            throw 'The native WPF self-test wrote a handled or unhandled error report.'
           }
 
           if (-not (Test-Path $report)) {
@@ -157,6 +223,7 @@ jobs:
           $candidate = 'artifacts/Transcencode-Test-Candidate'
           New-Item -ItemType Directory -Path $candidate -Force | Out-Null
           Copy-Item "$publish/*" $candidate -Recurse -Force
+          Copy-Item 'smoke/NORMAL-STARTUP-PASSED.txt' $candidate -Force
           Copy-Item 'smoke/CLI-REGRESSION-PASSED.txt' $candidate -Force
           Copy-Item 'smoke/NATIVE-WPF-SELF-TEST.txt' $candidate -Force
 
@@ -164,16 +231,18 @@ jobs:
           Transcencode Native WPF Test Candidate
           Analyze. Encode. Verify.
 
-          This candidate passed Windows tests that created multilingual source
-          media with real black bars, verified Same as source and automatic crop
-          encodes, launched the actual native WPF application, completed a source
-          scan, inspected the live WPF tab tree, exercised Source Tracks and Deep
-          Analyze, applied the recommendation to the native Video model, tested
-          Upscale & Enhance, validated black-bar labels/order, constructed every
-          new XAML view, and changed/persisted/reset whole-interface scaling.
+          This candidate passed the real no-argument normal startup path using a clean,
+          isolated Transcencode profile. It also passed multilingual source scanning,
+          Same as source and automatic-crop encodes, the native in-process WPF source
+          scan, Source Tracks, Deep Analyze, application of the recommendation to the
+          real Video model, Upscale & Enhance, black-bar labels/order, all new XAML
+          views, and whole-interface scaling.
 
-          The internal executable remains HandBrake.exe during compatibility
-          testing. Extract the complete folder and keep every file together.
+          Transcencode now uses %APPDATA%\Transcencode instead of sharing official
+          HandBrake settings, presets, queue state, or logs. Its worker port is 8047.
+
+          The internal executable remains HandBrake.exe during compatibility testing.
+          Extract the complete folder and keep every file together.
           "@ | Set-Content (Join-Path $candidate 'TEST-CANDIDATE.txt') -Encoding UTF8
 
           Compress-Archive `
@@ -203,10 +272,12 @@ jobs:
           }
 
           foreach ($relative in @(
-            'smoke/AppData/HandBrake',
-            'smoke/LocalAppData/HandBrake',
-            'smoke/AppData/Transcencode',
-            'smoke/LocalAppData/Transcencode')) {
+            'smoke/NormalStartupAppData/Transcencode',
+            'smoke/NormalStartupLocalAppData/Transcencode',
+            'smoke/NormalStartupDiagnostics',
+            'smoke/SelfTestAppData/Transcencode',
+            'smoke/SelfTestLocalAppData/Transcencode',
+            'smoke/SelfTestDiagnostics')) {
             if (Test-Path $relative) {
               Copy-Item $relative 'smoke-diagnostics' -Recurse -Force -ErrorAction SilentlyContinue
             }
