@@ -1,109 +1,54 @@
-name: Transcencode Fast WPF Compile Gate
+name: Transcencode Source Materialization
 
 on:
   workflow_dispatch:
   push:
     branches:
       - "transcencode/native-wpf-alpha"
-  pull_request:
-    branches:
-      - master
 
 concurrency:
-  group: transcencode-fast-wpf-${{ github.ref }}
+  group: transcencode-materialize-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  compile_gui:
-    name: Compile patched HandBrake WPF GUI
-    runs-on: windows-2022
+  materialize:
+    name: Materialize and validate hardened native GUI source
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-
-      - name: Expand and apply native Transcencode WPF patch
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Path '.transcencode-bootstrap' -Force | Out-Null
-          tar -xJf 'transcencode/bootstrap/native-wpf-alpha.tar.xz' -C '.transcencode-bootstrap'
-          & '.transcencode-bootstrap/transcencode/patch/Apply-TranscencodePatch.ps1' `
-            -SourceRoot (Get-Location).Path `
-            -OverlayRoot (Join-Path (Get-Location).Path '.transcencode-bootstrap/transcencode/overlay')
-
-      - name: Download and verify official HandBrake 1.11.2 runtime files
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ProgressPreference = 'SilentlyContinue'
-          New-Item -ItemType Directory -Path '.handbrake-runtime' -Force | Out-Null
-
-          $libArchive = '.handbrake-runtime/LibHB-1.11.2-win-x86_64.zip'
-          $cliArchive = '.handbrake-runtime/HandBrakeCLI-1.11.2-win-x86_64.zip'
-          Invoke-WebRequest -Uri 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/LibHB-1.11.2-win-x86_64.zip' -OutFile $libArchive
-          Invoke-WebRequest -Uri 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/HandBrakeCLI-1.11.2-win-x86_64.zip' -OutFile $cliArchive
-
-          $libHash = (Get-FileHash $libArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          $cliHash = (Get-FileHash $cliArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($libHash -ne 'd9bd679822f2c313f4918e7833eb2f57a9d2ceeb7ed0152343bc99c9cb44bdb0') {
-            throw "LibHB checksum mismatch: $libHash"
-          }
-          if ($cliHash -ne '80bfe8d5f5d11cc3ef76b834add3ed4e82dee6523ffeb435c283f88b1a21f09d') {
-            throw "HandBrakeCLI checksum mismatch: $cliHash"
-          }
-
-          Expand-Archive -LiteralPath $libArchive -DestinationPath '.handbrake-runtime/libhb' -Force
-          Expand-Archive -LiteralPath $cliArchive -DestinationPath '.handbrake-runtime/cli' -Force
-
-      - name: Setup .NET 10
-        uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
 
-      - name: Publish WPF GUI and worker
-        shell: pwsh
+      - name: Expand visible source and remove temporary archives
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          dotnet publish 'win/CS/HandBrakeWPF/HandBrakeWPF.csproj' -p:PublishProfile=publish_x64
-          dotnet publish 'win/CS/HandBrake.Worker/HandBrake.Worker.csproj' -p:PublishProfile=publish_x64
+          set -euo pipefail
+          test -f transcencode/bootstrap/hardening-source-v2.tar.xz
+          tar -xJf transcencode/bootstrap/hardening-source-v2.tar.xz -C .
+          rm -f transcencode/bootstrap/hardening-source-v2.tar.xz
+          rm -f transcencode/bootstrap/native-wpf-alpha.tar.xz
+          rmdir transcencode/bootstrap 2>/dev/null || true
+          rm -f .github/workflows/materialize-transcencode-hardening.yml
 
-      - name: Stage runnable Windows package
-        shell: pwsh
+      - name: Validate materialized source
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $publish = 'win/CS/HandBrakeWPF/bin/publish'
-          $worker = 'win/CS/HandBrake.Worker/bin/publish'
-          if (-not (Test-Path (Join-Path $publish 'HandBrake.exe'))) {
-            throw 'The patched native WPF GUI did not produce HandBrake.exe.'
-          }
-          if (-not (Test-Path (Join-Path $worker 'HandBrake.Worker.exe'))) {
-            throw 'The HandBrake worker did not build.'
-          }
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet pyyaml lxml
+          python3 transcencode/tests/validate_overlay.py
+          rm -f validation.json MANIFEST.json
 
-          Copy-Item "$worker/*" $publish -Recurse -Force
-          $hbDll = Get-ChildItem '.handbrake-runtime/libhb' -Filter 'hb.dll' -Recurse | Select-Object -First 1
-          $cli = Get-ChildItem '.handbrake-runtime/cli' -Filter 'HandBrakeCLI.exe' -Recurse | Select-Object -First 1
-          if ($null -eq $hbDll) { throw 'Verified LibHB archive did not contain hb.dll.' }
-          if ($null -eq $cli) { throw 'Verified CLI archive did not contain HandBrakeCLI.exe.' }
-          Copy-Item $hbDll.FullName (Join-Path $publish 'hb.dll') -Force
-          Copy-Item $cli.FullName (Join-Path $publish 'HandBrakeCLI.exe') -Force
-
-          New-Item -ItemType Directory -Path 'artifacts/Transcencode' -Force | Out-Null
-          Copy-Item "$publish/*" 'artifacts/Transcencode' -Recurse -Force
-          @"
-          Transcencode native WPF compile-gate build
-          Analyze. Encode. Verify.
-
-          This is the real HandBrake Windows GUI with native Transcencode tabs applied.
-          The internal executable remains HandBrake.exe during the first compatibility gate.
-          "@ | Set-Content 'artifacts/Transcencode/TRANSCENCODE-ALPHA.txt' -Encoding UTF8
-          Compress-Archive -Path 'artifacts/Transcencode' -DestinationPath 'artifacts/Transcencode-Windows-x64-Fast-Compile.zip' -Force
-
-      - name: Upload runnable WPF package
-        uses: actions/upload-artifact@v7
-        with:
-          name: Transcencode-Windows-x64-Fast-Compile
-          path: artifacts/Transcencode-Windows-x64-Fast-Compile.zip
-          if-no-files-found: error
+      - name: Commit visible hardening source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Transcencode Build Bot"
+          git config user.email "transcencode-build@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Transcencode: harden native GUI and add runtime tests"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
