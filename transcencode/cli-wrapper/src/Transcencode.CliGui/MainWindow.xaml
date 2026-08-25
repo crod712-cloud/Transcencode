@@ -1,0 +1,403 @@
+<Window x:Class="Transcencode.CliGui.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Transcencode — Analyze. Encode. Verify."
+        Width="1240" Height="850" MinWidth="1040" MinHeight="700"
+        WindowStartupLocation="CenterScreen"
+        Loaded="Window_Loaded" Closing="Window_Closing">
+    <ScrollViewer x:Name="RootScroller" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+        <Grid x:Name="ScaleRoot" Margin="18">
+            <Grid.LayoutTransform>
+                <ScaleTransform x:Name="InterfaceScaleTransform" ScaleX="1" ScaleY="1" />
+            </Grid.LayoutTransform>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" MinHeight="470" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Margin="0,0,0,14">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <TextBlock Text="Transcencode" FontSize="32" FontWeight="SemiBold" />
+                    <TextBlock Text="Analyze. Encode. Verify." FontSize="17" Foreground="{StaticResource Accent}" />
+                </StackPanel>
+                <Border Grid.Column="1" Background="#202A35" BorderBrush="{StaticResource PanelBorder}" BorderThickness="1" CornerRadius="5" Padding="12,8">
+                    <StackPanel>
+                        <TextBlock Text="Normal Windows interface" FontWeight="SemiBold" />
+                        <TextBlock Text="HandBrakeCLI runs hidden; live output stays inside Transcencode." Foreground="{StaticResource SecondaryText}" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Grid Grid.Row="1" Margin="0,0,0,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Source" VerticalAlignment="Center" FontWeight="SemiBold" />
+                <TextBox x:Name="SourcePathTextBox" Grid.Column="1" IsReadOnly="True" VerticalContentAlignment="Center" />
+                <Button x:Name="BrowseSourceButton" Grid.Column="2" Content="Choose video…" Click="BrowseSourceButton_Click" />
+                <Button x:Name="ScanButton" Grid.Column="3" Content="Scan file details" Click="ScanButton_Click" />
+            </Grid>
+
+            <Grid Grid.Row="2" Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Output" VerticalAlignment="Center" FontWeight="SemiBold" />
+                <TextBox x:Name="OutputPathTextBox" Grid.Column="1" VerticalContentAlignment="Center" TextChanged="OutputPathTextBox_TextChanged" />
+                <Button x:Name="BrowseOutputButton" Grid.Column="2" Content="Choose output…" Click="BrowseOutputButton_Click" />
+            </Grid>
+
+            <TabControl x:Name="MainTabs" Grid.Row="3" Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource PanelBorder}">
+                <TabItem x:Name="SourceTracksTab" Header="Source Tracks">
+                    <Grid Margin="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <GroupBox Header="Quick source scan — file details only">
+                            <StackPanel>
+                                <TextBlock Text="This scan reads the title, picture format, HDR flags, crop estimate, audio tracks, and subtitle tracks. It is not the deeper picture-content analysis on the Analyze tab." Foreground="{StaticResource SecondaryText}" />
+                                <TextBlock x:Name="SourceSummaryTextBlock" Margin="0,8,0,0" Text="Choose a source file to begin." />
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Grid.Row="1" Header="Audio tracks available in the source">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="Select all" Click="SelectAllAudio_Click" />
+                                    <Button Content="Select none" Click="SelectNoAudio_Click" />
+                                    <TextBlock Text="Checked tracks will be included in the encode." VerticalAlignment="Center" Foreground="{StaticResource SecondaryText}" Margin="8,0" />
+                                </StackPanel>
+                                <DataGrid x:Name="AudioTracksGrid" Grid.Row="1" AutoGenerateColumns="False" AlternationCount="2" Margin="0,6,0,0">
+                                    <DataGrid.Columns>
+                                        <DataGridCheckBoxColumn Header="Include" Binding="{Binding Selected, UpdateSourceTrigger=PropertyChanged}" Width="70" />
+                                        <DataGridTextColumn Header="#" Binding="{Binding Number}" Width="45" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Language" Binding="{Binding Language}" Width="150" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Code" Binding="{Binding Code}" Width="70" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Codec" Binding="{Binding Codec}" Width="170" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Channels / rate" Binding="{Binding Details}" Width="*" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="160" IsReadOnly="True" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </Grid>
+                        </GroupBox>
+
+                        <GroupBox Grid.Row="2" Header="Subtitle tracks available in the source">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="Select all" Click="SelectAllSubtitles_Click" />
+                                    <Button Content="Select none" Click="SelectNoSubtitles_Click" />
+                                    <TextBlock Text="Checked tracks will be passed to HandBrake for the output container." VerticalAlignment="Center" Foreground="{StaticResource SecondaryText}" Margin="8,0" />
+                                </StackPanel>
+                                <DataGrid x:Name="SubtitleTracksGrid" Grid.Row="1" AutoGenerateColumns="False" AlternationCount="2" Margin="0,6,0,0">
+                                    <DataGrid.Columns>
+                                        <DataGridCheckBoxColumn Header="Include" Binding="{Binding Selected, UpdateSourceTrigger=PropertyChanged}" Width="70" />
+                                        <DataGridTextColumn Header="#" Binding="{Binding Number}" Width="45" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Language" Binding="{Binding Language}" Width="150" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Code" Binding="{Binding Code}" Width="70" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Type" Binding="{Binding Codec}" Width="180" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Capabilities" Binding="{Binding Details}" Width="*" IsReadOnly="True" />
+                                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="160" IsReadOnly="True" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </Grid>
+                        </GroupBox>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="Video">
+                    <Grid Margin="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <GroupBox Header="Encoder">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="170" />
+                                    <ColumnDefinition Width="420" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Video encoder" VerticalAlignment="Center" />
+                                <ComboBox x:Name="EncoderComboBox" Grid.Column="1" SelectionChanged="EncoderComboBox_SelectionChanged" />
+                                <TextBlock x:Name="EncoderAvailabilityTextBlock" Grid.Column="2" VerticalAlignment="Center" Margin="10,0" Foreground="{StaticResource SecondaryText}" />
+                            </Grid>
+                        </GroupBox>
+
+                        <GroupBox Grid.Row="1" Header="Picture quality — plain-language target">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="170" />
+                                    <ColumnDefinition Width="420" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Quality target" VerticalAlignment="Center" />
+                                <ComboBox x:Name="QualityTargetComboBox" Grid.Column="1" SelectionChanged="QualityTargetComboBox_SelectionChanged" />
+                                <TextBlock x:Name="ActualQualityTextBlock" Grid.Column="2" VerticalAlignment="Center" Margin="10,0" FontWeight="SemiBold" Foreground="{StaticResource Accent}" />
+
+                                <TextBlock Grid.Row="1" Text="Custom control" VerticalAlignment="Center" />
+                                <Grid Grid.Row="1" Grid.Column="1" Margin="4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Smaller file" VerticalAlignment="Center" Foreground="{StaticResource SecondaryText}" />
+                                    <Slider x:Name="QualitySlider" Grid.Column="1" Minimum="0" Maximum="100" Value="66" Margin="12,0" ValueChanged="QualitySlider_ValueChanged" />
+                                    <TextBlock Grid.Column="2" Text="Higher quality" VerticalAlignment="Center" Foreground="{StaticResource SecondaryText}" />
+                                </Grid>
+                                <TextBlock Grid.Row="2" Grid.ColumnSpan="3" x:Name="QualityExplanationTextBlock" Margin="0,8,0,0" Foreground="{StaticResource SecondaryText}" />
+                            </Grid>
+                        </GroupBox>
+
+                        <GroupBox Grid.Row="2" Header="Hardware decoding">
+                            <StackPanel>
+                                <CheckBox x:Name="NvdecCheckBox" Content="Use NVIDIA NVDEC to decode the source when supported" />
+                                <TextBlock Text="NVDEC affects source decoding. NVENC is the separate video encoder selected above. Leaving NVDEC off can help troubleshoot driver or format compatibility without disabling NVENC." Foreground="{StaticResource SecondaryText}" />
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Grid.Row="3" Header="HDR and Dolby Vision">
+                            <TextBlock x:Name="HdrCompatibilityTextBlock" Text="Load a source to see HDR compatibility guidance." Foreground="{StaticResource SecondaryText}" />
+                        </GroupBox>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="Picture & Black Bars">
+                    <Grid Margin="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <GroupBox Header="Black bars">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="170" />
+                                    <ColumnDefinition Width="420" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Handling" VerticalAlignment="Center" />
+                                <ComboBox x:Name="CropModeComboBox" Grid.Column="1" SelectionChanged="CropModeComboBox_SelectionChanged" />
+                                <TextBlock x:Name="CropExplanationTextBlock" Grid.Column="2" Margin="10,0" VerticalAlignment="Center" Foreground="{StaticResource SecondaryText}" />
+
+                                <TextBlock Grid.Row="1" Text="Custom crop" VerticalAlignment="Center" />
+                                <StackPanel x:Name="CustomCropPanel" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal">
+                                    <TextBlock Text="Top" VerticalAlignment="Center" /><TextBox x:Name="CropTopTextBox" Width="65" Text="0" />
+                                    <TextBlock Text="Bottom" VerticalAlignment="Center" /><TextBox x:Name="CropBottomTextBox" Width="65" Text="0" />
+                                    <TextBlock Text="Left" VerticalAlignment="Center" /><TextBox x:Name="CropLeftTextBox" Width="65" Text="0" />
+                                    <TextBlock Text="Right" VerticalAlignment="Center" /><TextBox x:Name="CropRightTextBox" Width="65" Text="0" />
+                                </StackPanel>
+                                <TextBlock Grid.Row="2" Grid.ColumnSpan="3" Text="‘Same as source’ is first and disables cropping completely. It preserves the entire original frame, including letterbox or pillarbox bars." Margin="0,8,0,0" Foreground="{StaticResource Success}" />
+                            </Grid>
+                        </GroupBox>
+
+                        <GroupBox Grid.Row="1" Header="Output resolution">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="170" />
+                                    <ColumnDefinition Width="420" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Size" VerticalAlignment="Center" />
+                                <ComboBox x:Name="ScaleModeComboBox" Grid.Column="1" SelectionChanged="ScaleModeComboBox_SelectionChanged" />
+                                <TextBlock Grid.Column="2" Text="Upscaling uses HandBrake's scaler. RTX Video SDK AI enhancement is not falsely presented as implemented in this wrapper." Margin="10,0" Foreground="{StaticResource SecondaryText}" />
+                                <TextBlock Grid.Row="1" Text="Custom size" VerticalAlignment="Center" />
+                                <StackPanel x:Name="CustomScalePanel" Grid.Row="1" Grid.Column="1" Orientation="Horizontal">
+                                    <TextBlock Text="Width" VerticalAlignment="Center" /><TextBox x:Name="CustomWidthTextBox" Width="90" Text="1920" />
+                                    <TextBlock Text="Height" VerticalAlignment="Center" /><TextBox x:Name="CustomHeightTextBox" Width="90" Text="1080" />
+                                </StackPanel>
+                            </Grid>
+                        </GroupBox>
+                    </Grid>
+                </TabItem>
+
+                <TabItem x:Name="AnalyzeTab" Header="Analyze">
+                    <Grid Margin="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <GroupBox Header="Deep Analyze Video">
+                            <StackPanel>
+                                <TextBlock Text="This is separate from Scan file details. Deep Analyze decodes representative picture samples across the video and measures brightness, dark-pixel load, contrast, fine detail, motion, scene change, and encoding difficulty. It identifies difficult timestamps and recommends a CQ/RF starting point." />
+                                <TextBlock Text="It is representative sampling rather than an exhaustive every-frame proof. HandBrake's constant-quality encoders still allocate bitrate dynamically scene by scene." Foreground="{StaticResource SecondaryText}" Margin="0,6,0,0" />
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <Button x:Name="DeepAnalyzeButton" Content="Run Deep Analyze" Click="DeepAnalyzeButton_Click" />
+                                    <Button x:Name="ApplyAnalysisButton" Content="Apply recommendation to Video" Click="ApplyAnalysisButton_Click" IsEnabled="False" />
+                                    <ProgressBar x:Name="AnalysisProgressBar" Width="280" Height="20" Minimum="0" Maximum="100" Margin="12,8" />
+                                </StackPanel>
+                            </StackPanel>
+                        </GroupBox>
+                        <TextBlock x:Name="AnalysisSummaryTextBlock" Grid.Row="1" Margin="4,0,4,10" Text="No deep analysis has been run." />
+                        <TextBlock Grid.Row="2" Text="Hardest sampled timestamps" FontWeight="SemiBold" Margin="4" />
+                        <DataGrid x:Name="AnalysisGrid" Grid.Row="3" AutoGenerateColumns="False" IsReadOnly="True" AlternationCount="2">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="#" Binding="{Binding Number}" Width="45" />
+                                <DataGridTextColumn Header="Time" Binding="{Binding TimeText}" Width="90" />
+                                <DataGridTextColumn Header="Brightness" Binding="{Binding BrightnessText}" Width="100" />
+                                <DataGridTextColumn Header="Dark pixels" Binding="{Binding DarkText}" Width="100" />
+                                <DataGridTextColumn Header="Contrast" Binding="{Binding ContrastText}" Width="90" />
+                                <DataGridTextColumn Header="Detail" Binding="{Binding DetailText}" Width="90" />
+                                <DataGridTextColumn Header="Motion" Binding="{Binding MotionText}" Width="90" />
+                                <DataGridTextColumn Header="Difficulty" Binding="{Binding DifficultyText}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem x:Name="LiveEngineTab" Header="Live Engine">
+                    <Grid Margin="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Border Background="#202A35" BorderBrush="{StaticResource PanelBorder}" BorderThickness="1" CornerRadius="5" Padding="10" Margin="0,0,0,8">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="1.2*" />
+                                    <ColumnDefinition Width="1*" />
+                                    <ColumnDefinition Width="1*" />
+                                    <ColumnDefinition Width="1*" />
+                                    <ColumnDefinition Width="1.25*" />
+                                    <ColumnDefinition Width="1*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel><TextBlock Text="Status" Foreground="{StaticResource SecondaryText}" /><TextBlock x:Name="EngineStatusTextBlock" Text="Idle" FontWeight="SemiBold" /></StackPanel>
+                                <StackPanel Grid.Column="1"><TextBlock Text="Progress" Foreground="{StaticResource SecondaryText}" /><TextBlock x:Name="EnginePercentTextBlock" Text="0.0%" FontWeight="SemiBold" /></StackPanel>
+                                <StackPanel Grid.Column="2"><TextBlock Text="Elapsed" Foreground="{StaticResource SecondaryText}" /><TextBlock x:Name="ElapsedTextBlock" Text="00:00:00" FontWeight="SemiBold" /></StackPanel>
+                                <StackPanel Grid.Column="3"><TextBlock Text="ETA remaining" Foreground="{StaticResource SecondaryText}" /><TextBlock x:Name="EtaTextBlock" Text="—" FontWeight="SemiBold" /></StackPanel>
+                                <StackPanel Grid.Column="4"><TextBlock Text="Estimated finish" Foreground="{StaticResource SecondaryText}" /><TextBlock x:Name="FinishTimeTextBlock" Text="—" FontWeight="SemiBold" /></StackPanel>
+                                <StackPanel Grid.Column="5"><TextBlock Text="Average speed" Foreground="{StaticResource SecondaryText}" /><TextBlock x:Name="AverageSpeedTextBlock" Text="—" FontWeight="SemiBold" /></StackPanel>
+                            </Grid>
+                        </Border>
+                        <ProgressBar x:Name="EngineProgressBar" Grid.Row="1" Height="18" Minimum="0" Maximum="100" Margin="0,0,0,8" />
+                        <TextBox x:Name="EngineConsoleTextBox" Grid.Row="2" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12" Background="#0B0F13" Foreground="#D7E4EF" />
+                        <Grid Grid.Row="3" Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="CommandPreviewTextBlock" Text="The exact HandBrakeCLI command will appear here before encoding." Foreground="{StaticResource SecondaryText}" VerticalAlignment="Center" />
+                            <CheckBox x:Name="FollowOutputCheckBox" Grid.Column="1" Content="Follow output" IsChecked="True" VerticalAlignment="Center" />
+                            <Button Grid.Column="2" Content="Clear view" Click="ClearConsoleButton_Click" />
+                        </Grid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem x:Name="VerifyTab" Header="Verify">
+                    <Grid Margin="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <GroupBox Header="Verify encoded output">
+                            <StackPanel>
+                                <TextBlock Text="Verify reopens the encoded file through HandBrake, checks structure, duration, resolution, and tracks, then samples source/output pictures for visual similarity. Cropping, scaling, and intentional filters can lower the visual score and are reported for review rather than hidden." />
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <Button x:Name="VerifyOutputButton" Content="Verify output" Click="VerifyOutputButton_Click" />
+                                    <ProgressBar x:Name="VerifyProgressBar" Width="280" Height="20" Minimum="0" Maximum="100" Margin="12,8" />
+                                </StackPanel>
+                            </StackPanel>
+                        </GroupBox>
+                        <TextBlock x:Name="VerifySummaryTextBlock" Grid.Row="1" Margin="4,0,4,10" Text="No output has been verified." />
+                        <DataGrid x:Name="VerificationGrid" Grid.Row="2" AutoGenerateColumns="False" IsReadOnly="True" AlternationCount="2">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Check" Binding="{Binding Check}" Width="210" />
+                                <DataGridTextColumn Header="Result" Binding="{Binding Status}" Width="100" />
+                                <DataGridTextColumn Header="Details" Binding="{Binding Details}" Width="*" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="Settings">
+                    <Grid Margin="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <GroupBox Header="Interface size">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="170" />
+                                    <ColumnDefinition Width="240" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Scale everything" VerticalAlignment="Center" />
+                                <ComboBox x:Name="InterfaceScaleComboBox" Grid.Column="1" SelectionChanged="InterfaceScaleComboBox_SelectionChanged" />
+                                <TextBlock Grid.Column="2" Text="The complete interface scales from 100% to 200%. Scroll bars remain available when the scaled layout is larger than the window." VerticalAlignment="Center" Margin="10,0" Foreground="{StaticResource SecondaryText}" />
+                            </Grid>
+                        </GroupBox>
+                        <GroupBox Grid.Row="1" Header="Local files">
+                            <StackPanel>
+                                <TextBlock Text="Settings and logs are isolated under %LOCALAPPDATA%\Transcencode. This wrapper does not read or overwrite official HandBrake GUI settings." />
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <Button Content="Open logs folder" Click="OpenLogsButton_Click" />
+                                    <Button Content="Open application folder" Click="OpenAppFolderButton_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </GroupBox>
+                    </Grid>
+                </TabItem>
+            </TabControl>
+
+            <Grid Grid.Row="4" Margin="0,12,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="StatusTextBlock" Text="Ready." VerticalAlignment="Center" Foreground="{StaticResource SecondaryText}" />
+                <Button x:Name="OpenLiveEngineButton" Grid.Column="1" Content="Live Engine" Click="OpenLiveEngineButton_Click" />
+                <Button x:Name="CancelButton" Grid.Column="2" Content="Cancel" Click="CancelButton_Click" IsEnabled="False" />
+                <Button x:Name="EncodeNowButton" Grid.Column="3" Content="Encode Now" Click="EncodeNowButton_Click" FontWeight="SemiBold" MinWidth="130" />
+            </Grid>
+        </Grid>
+    </ScrollViewer>
+</Window>
