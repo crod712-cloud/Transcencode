@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Transcencode</AssemblyName>
+    <RootNamespace>Transcencode.CliGui</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Transcencode.ico</ApplicationIcon>
+    <Version>0.2.9</Version>
+    <AssemblyVersion>0.2.9.0</AssemblyVersion>
+    <FileVersion>0.2.9.0</FileVersion>
+    <Product>Transcencode</Product>
+    <Description>Transcencode — Analyze. Encode. Verify.</Description>
+    <Company>Transcencode</Company>
+    <Copyright>GPL-2.0-or-later; incorporates HandBrakeCLI as a separate GPL component.</Copyright>
+    <PublishSingleFile>false</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenCvSharp4.Windows" Version="4.10.0.20240616" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Engine\HandBrakeCLI.exe" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Engine\HandBrakeCLI.exe')" />
+  </ItemGroup>
+</Project>
