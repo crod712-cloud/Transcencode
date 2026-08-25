@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   runtime_smoke:
-    name: Build, launch, inspect UI, analyze, and encode test media
+    name: Build, launch, analyze, encode, and inspect native WPF UI
     runs-on: windows-2022
     timeout-minutes: 45
 
@@ -37,7 +37,7 @@ jobs:
             -SourceRoot (Get-Location).Path `
             -OverlayRoot (Join-Path (Get-Location).Path 'transcencode/hardening-overlay')
 
-      - name: Download and verify official HandBrake runtime files
+      - name: Download and verify official HandBrake 1.11.2 runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -66,7 +66,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Publish patched WPF GUI and worker
+      - name: Publish patched native WPF GUI and worker
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -90,7 +90,7 @@ jobs:
             }
           }
 
-      - name: Create black-bar, multi-track regression source
+      - name: Install ffmpeg test dependency
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -98,379 +98,42 @@ jobs:
             choco install ffmpeg -y --no-progress
             $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
           }
+          ffmpeg -version | Select-Object -First 1
 
-          New-Item -ItemType Directory -Path 'smoke' -Force | Out-Null
-          @"
-          1
-          00:00:00,000 --> 00:00:02,500
-          English subtitle smoke test
-          "@ | Set-Content 'smoke/en.srt' -Encoding UTF8
-          @"
-          1
-          00:00:00,000 --> 00:00:02,500
-          Prueba de subtitulos en espanol
-          "@ | Set-Content 'smoke/es.srt' -Encoding UTF8
-
-          ffmpeg -hide_banner -loglevel error -y `
-            -f lavfi -i 'color=c=black:size=1280x720:rate=30:duration=8' `
-            -f lavfi -i 'testsrc2=size=1280x536:rate=30:duration=8' `
-            -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=8' `
-            -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=8' `
-            -i 'smoke/en.srt' -i 'smoke/es.srt' `
-            -filter_complex '[0:v][1:v]overlay=0:92[v]' `
-            -map '[v]' -map 2:a:0 -map 3:a:0 -map 4:s:0 -map 5:s:0 `
-            -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p `
-            -c:a aac -b:a 128k -c:s srt `
-            -metadata:s:a:0 language=eng -metadata:s:a:0 title='English Test' `
-            -metadata:s:a:1 language=spa -metadata:s:a:1 title='Spanish Test' `
-            -metadata:s:s:0 language=eng -metadata:s:s:0 title='English Test' `
-            -metadata:s:s:1 language=spa -metadata:s:s:1 title='Spanish Test' `
-            'smoke/source.mkv'
-
-          if (-not (Test-Path 'smoke/source.mkv')) { throw 'ffmpeg did not create the regression source.' }
-
-      - name: Validate source scan, tracks, crop modes, and completed encodes
+      - name: Run complete Windows runtime and UI smoke test
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
-          $cli = Join-Path $publish 'HandBrakeCLI.exe'
-
-          & $cli --scan -i 'smoke/source.mkv' 2>&1 | Tee-Object -FilePath 'smoke/source-scan.txt'
-          $scan = Get-Content 'smoke/source-scan.txt' -Raw
-          if ($LASTEXITCODE -ne 0) { throw "HandBrakeCLI source scan failed with exit code $LASTEXITCODE." }
-          if ($scan -notmatch '(?i)English|eng') { throw 'Source scan did not expose the English track metadata.' }
-          if ($scan -notmatch '(?i)Spanish|spa|español') { throw 'Source scan did not expose the Spanish track metadata.' }
-          if ($scan -notmatch '(?i)autocrop\s*(?:=|:)\s*[1-9]\d*/[1-9]\d*/0/0') {
-            throw 'Regression source did not produce detectable top and bottom black bars.'
-          }
-
-          & $cli -i 'smoke/source.mkv' -o 'smoke/output-preserve.mkv' `
-            -e x264 -q 22 --encoder-preset veryfast `
-            --crop-mode none --all-audio --all-subtitles 2>&1 | Tee-Object -FilePath 'smoke/encode-preserve.txt'
-          if ($LASTEXITCODE -ne 0) { throw "Same-as-source encode failed with exit code $LASTEXITCODE." }
-
-          & $cli --scan -i 'smoke/output-preserve.mkv' 2>&1 | Tee-Object -FilePath 'smoke/output-preserve-scan.txt'
-          $preserveScan = Get-Content 'smoke/output-preserve-scan.txt' -Raw
-          if ($LASTEXITCODE -ne 0) { throw "Preserved-output scan failed with exit code $LASTEXITCODE." }
-          if ($preserveScan -notmatch '1280x720') {
-            throw 'Same-as-source regression: full 1280x720 frame and original black bars were not preserved.'
-          }
-          if ($preserveScan -notmatch '(?s)audio tracks:.*?\+\s*1,.*?\+\s*2,') {
-            throw 'Preserved output did not contain both audio tracks.'
-          }
-          if ($preserveScan -notmatch '(?s)subtitle tracks:.*?\+\s*1,.*?\+\s*2,') {
-            throw 'Preserved output did not contain both subtitle tracks.'
-          }
-
-          & $cli -i 'smoke/source.mkv' -o 'smoke/output-auto-crop.mkv' `
-            -e x264 -q 22 --encoder-preset veryfast `
-            --crop-mode auto -a 1 -s none 2>&1 | Tee-Object -FilePath 'smoke/encode-auto-crop.txt'
-          if ($LASTEXITCODE -ne 0) { throw "Automatic-crop encode failed with exit code $LASTEXITCODE." }
-
-          & $cli --scan -i 'smoke/output-auto-crop.mkv' 2>&1 | Tee-Object -FilePath 'smoke/output-auto-crop-scan.txt'
-          $autoScan = Get-Content 'smoke/output-auto-crop-scan.txt' -Raw
-          if ($LASTEXITCODE -ne 0) { throw "Automatic-crop output scan failed with exit code $LASTEXITCODE." }
-          $sizeMatch = [regex]::Match($autoScan, '(?i)\+\s*size:\s*(\d+)x(\d+)')
-          if (-not $sizeMatch.Success) { throw 'Could not read automatic-crop output dimensions.' }
-          $autoHeight = [int]$sizeMatch.Groups[2].Value
-          if ($autoHeight -ge 720) {
-            throw "Automatic crop did not remove the detected bars; output height was $autoHeight."
-          }
-
-      - name: Launch GUI, load source, exercise native tabs, analyze, and scale
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Add-Type -AssemblyName UIAutomationClient
-          Add-Type -AssemblyName UIAutomationTypes
-
-          function Find-Element {
-            param(
-              [System.Windows.Automation.AutomationElement]$Root,
-              [System.Windows.Automation.ControlType]$ControlType,
-              [string]$Name
-            )
-            $byType = New-Object System.Windows.Automation.PropertyCondition(
-              [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-              $ControlType)
-            $byName = New-Object System.Windows.Automation.PropertyCondition(
-              [System.Windows.Automation.AutomationElement]::NameProperty,
-              $Name)
-            $condition = New-Object System.Windows.Automation.AndCondition($byType, $byName)
-            return $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-          }
-
-          function Get-TabNames {
-            param([System.Windows.Automation.AutomationElement]$Root)
-            $condition = New-Object System.Windows.Automation.PropertyCondition(
-              [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-              [System.Windows.Automation.ControlType]::TabItem)
-            $items = $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
-            $result = @()
-            foreach ($item in $items) {
-              if (-not [string]::IsNullOrWhiteSpace($item.Current.Name)) {
-                $result += $item.Current.Name
-              }
-            }
-            return @($result | Sort-Object -Unique)
-          }
-
-          function Get-AllAutomationNames {
-            param([System.Windows.Automation.AutomationElement]$Root)
-            $items = $Root.FindAll(
-              [System.Windows.Automation.TreeScope]::Descendants,
-              [System.Windows.Automation.Condition]::TrueCondition)
-            $result = @()
-            foreach ($item in $items) {
-              try {
-                if (-not [string]::IsNullOrWhiteSpace($item.Current.Name)) {
-                  $result += $item.Current.Name
-                }
-              }
-              catch {
-              }
-            }
-            return @($result | Sort-Object -Unique)
-          }
-
-          function Select-Tab {
-            param(
-              [System.Windows.Automation.AutomationElement]$Root,
-              [string]$Name
-            )
-            $tab = Find-Element -Root $Root -ControlType ([System.Windows.Automation.ControlType]::TabItem) -Name $Name
-            if ($null -eq $tab) { throw "Could not find tab '$Name'." }
-            $pattern = $tab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-            $pattern.Select()
-            Start-Sleep -Milliseconds 750
-          }
-
-          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
-          $source = (Resolve-Path 'smoke/source.mkv').Path
-          $appData = (Resolve-Path 'smoke').Path + '\AppData'
-          $localAppData = (Resolve-Path 'smoke').Path + '\LocalAppData'
-          New-Item -ItemType Directory -Path $appData,$localAppData -Force | Out-Null
-
-          $oldAppData = $env:APPDATA
-          $oldLocalAppData = $env:LOCALAPPDATA
-          $env:APPDATA = $appData
-          $env:LOCALAPPDATA = $localAppData
-
-          $process = $null
-          try {
-            $process = Start-Process `
-              -FilePath (Join-Path $publish 'HandBrake.exe') `
-              -ArgumentList @($source, '--no-hardware') `
-              -WorkingDirectory $publish `
-              -PassThru
-
-            $windowDeadline = [DateTime]::UtcNow.AddSeconds(35)
-            do {
-              Start-Sleep -Milliseconds 500
-              $process.Refresh()
-              if ($process.HasExited) {
-                throw "Transcencode exited during startup with code $($process.ExitCode)."
-              }
-            } while ($process.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $windowDeadline)
-
-            if ($process.MainWindowHandle -eq 0) {
-              throw 'Transcencode did not create a main window within 35 seconds.'
-            }
-
-            $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
-            if ($null -eq $root) { throw 'UI Automation could not attach to the Transcencode main window.' }
-            $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-            if ($root.Current.Name -notmatch '(?i)Transcencode') {
-              throw "Main window title is not branded Transcencode. Actual title: '$($root.Current.Name)'"
-            }
-
-            $required = @(
-              'Summary','Dimensions','Filters','Video','Audio','Subtitles','Chapters',
-              'Analyze','Source Tracks','Upscale & Enhance','Verify','Live Engine')
-            $tabsDeadline = [DateTime]::UtcNow.AddSeconds(90)
-            $names = @()
-            do {
-              $process.Refresh()
-              if ($process.HasExited) {
-                throw "Transcencode exited while loading the source with code $($process.ExitCode)."
-              }
-              $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
-              $names = Get-TabNames -Root $root
-              $missing = @($required | Where-Object { $names -notcontains $_ })
-              if ($missing.Count -eq 0) { break }
-              Start-Sleep -Seconds 1
-            } while ([DateTime]::UtcNow -lt $tabsDeadline)
-
-            $names | Set-Content 'smoke/ui-tabs.txt' -Encoding UTF8
-            $missing = @($required | Where-Object { $names -notcontains $_ })
-            if ($missing.Count -gt 0) {
-              Get-AllAutomationNames -Root $root | Set-Content 'smoke/ui-tree-names.txt' -Encoding UTF8
-              throw "Native UI tab smoke test failed after source loading. Missing: $($missing -join ', '). Found: $($names -join ', ')"
-            }
-
-            Select-Tab -Root $root -Name 'Source Tracks'
-            $trackDeadline = [DateTime]::UtcNow.AddSeconds(20)
-            do {
-              $treeNames = Get-AllAutomationNames -Root $root
-              $hasSummary = $treeNames -contains "Source contains 2 audio tracks and 2 subtitle tracks. Select output tracks on HandBrake's Audio and Subtitles tabs."
-              $hasEnglish = ($treeNames -match '(?i)^English(?: Test)?$').Count -gt 0
-              $hasSpanish = ($treeNames -match '(?i)^(Spanish Test|español)$').Count -gt 0
-              if ($hasSummary -and $hasEnglish -and $hasSpanish) { break }
-              Start-Sleep -Milliseconds 500
-            } while ([DateTime]::UtcNow -lt $trackDeadline)
-            $treeNames | Set-Content 'smoke/source-tracks-ui.txt' -Encoding UTF8
-            if (-not ($hasSummary -and $hasEnglish -and $hasSpanish)) {
-              throw 'Source Tracks tab did not expose both source languages and the expected track counts.'
-            }
-
-            Select-Tab -Root $root -Name 'Analyze'
-            $analyzeButton = Find-Element -Root $root -ControlType ([System.Windows.Automation.ControlType]::Button) -Name 'Run Deep Analyze'
-            if ($null -eq $analyzeButton) { throw 'Run Deep Analyze button was not found.' }
-            if (-not $analyzeButton.Current.IsEnabled) { throw 'Run Deep Analyze button was disabled after source loading.' }
-            $invoke = $analyzeButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-            $invoke.Invoke()
-
-            $analysisDeadline = [DateTime]::UtcNow.AddSeconds(90)
-            $analysisComplete = $false
-            do {
-              $analysisNames = Get-AllAutomationNames -Root $root
-              if ($analysisNames -contains 'Deep Analyze complete.') {
-                $analysisComplete = $true
-                break
-              }
-              if (($analysisNames -match '^Deep Analyze failed:').Count -gt 0) {
-                throw (($analysisNames -match '^Deep Analyze failed:') | Select-Object -First 1)
-              }
-              Start-Sleep -Milliseconds 750
-            } while ([DateTime]::UtcNow -lt $analysisDeadline)
-            $analysisNames | Set-Content 'smoke/analyze-ui.txt' -Encoding UTF8
-            if (-not $analysisComplete) { throw 'Deep Analyze did not finish within 90 seconds.' }
-            if (($analysisNames -match '^Recommended starting point for ').Count -eq 0) {
-              throw 'Deep Analyze completed without exposing an encoder-aware recommendation.'
-            }
-
-            $applyButton = Find-Element -Root $root -ControlType ([System.Windows.Automation.ControlType]::Button) -Name 'Apply Recommendation to Video Tab'
-            if ($null -eq $applyButton -or -not $applyButton.Current.IsEnabled) {
-              throw 'Analyze recommendation could not be applied.'
-            }
-            $applyButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-            Start-Sleep -Milliseconds 750
-            $analysisNames = Get-AllAutomationNames -Root $root
-            if (($analysisNames -match '^Applied Constant Quality \d+ to HandBrake''s Video tab\.$').Count -eq 0) {
-              throw 'The recommendation application status was not shown.'
-            }
-
-            Select-Tab -Root $root -Name 'Dimensions'
-            $comboCondition = New-Object System.Windows.Automation.PropertyCondition(
-              [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-              [System.Windows.Automation.ControlType]::ComboBox)
-            $combos = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $comboCondition)
-            $cropPicker = $null
-            $cropItems = @()
-            foreach ($combo in $combos) {
-              try {
-                $combo.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
-                Start-Sleep -Milliseconds 150
-                $itemsCondition = New-Object System.Windows.Automation.PropertyCondition(
-                  [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-                  [System.Windows.Automation.ControlType]::ListItem)
-                $items = $desktop.FindAll([System.Windows.Automation.TreeScope]::Descendants, $itemsCondition)
-                $cropLabels = @(
-                  'Same as source (preserve original black bars)',
-                  'Safe auto-crop (least aggressive)',
-                  'Automatic crop (remove detected black bars)',
-                  'Custom crop')
-                $candidateNames = @()
-                foreach ($item in $items) {
-                  if ($cropLabels -contains $item.Current.Name) { $candidateNames += $item.Current.Name }
-                }
-                if ($candidateNames.Count -eq 4) {
-                  $cropPicker = $combo
-                  $cropItems = $candidateNames
-                  break
-                }
-                $combo.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Collapse()
-              }
-              catch {
-              }
-            }
-            $cropItems | Set-Content 'smoke/crop-options-ui.txt' -Encoding UTF8
-            if ($null -eq $cropPicker) { throw 'Plain-language black-bar control was not found in Dimensions.' }
-            if ($cropItems.Count -lt 4 -or $cropItems[0] -ne 'Same as source (preserve original black bars)') {
-              throw "Same as source was not the first black-bar option. Actual order: $($cropItems -join ' | ')"
-            }
-            $sameAsSource = Find-Element -Root $desktop -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Name 'Same as source (preserve original black bars)'
-            if ($null -eq $sameAsSource) { throw 'Same-as-source black-bar option could not be selected.' }
-            $sameAsSource.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
-
-            foreach ($tabName in @('Upscale & Enhance','Verify','Live Engine','Video','Summary')) {
-              Select-Tab -Root $root -Name $tabName
-              $process.Refresh()
-              if ($process.HasExited) {
-                throw "Transcencode crashed while opening '$tabName' with code $($process.ExitCode)."
-              }
-            }
-
-            $scaleCondition = New-Object System.Windows.Automation.PropertyCondition(
-              [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
-              'TranscencodeScalePicker')
-            $scalePicker = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $scaleCondition)
-            if ($null -eq $scalePicker) { throw 'Native interface-size control was not found.' }
-            $expand = $scalePicker.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
-            $expand.Expand()
-            Start-Sleep -Milliseconds 300
-            $scaleChoice = Find-Element -Root $desktop -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Name '125%'
-            if ($null -eq $scaleChoice) { throw '125% interface-size option was not found.' }
-            $scaleChoice.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
-            Start-Sleep -Milliseconds 750
-            $scaleFile = Join-Path $appData 'Transcencode\interface-scale.txt'
-            if (-not (Test-Path $scaleFile)) { throw 'Interface scale preference was not persisted.' }
-            $savedScale = (Get-Content $scaleFile -Raw).Trim()
-            if ($savedScale -ne '1.25') { throw "Expected saved interface scale 1.25, found '$savedScale'." }
-
-            $expand = $scalePicker.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
-            $expand.Expand()
-            Start-Sleep -Milliseconds 300
-            $resetChoice = Find-Element -Root $desktop -ControlType ([System.Windows.Automation.ControlType]::ListItem) -Name '100%'
-            if ($null -eq $resetChoice) { throw '100% interface-size reset option was not found.' }
-            $resetChoice.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
-            Start-Sleep -Milliseconds 500
-
-            Start-Sleep -Seconds 3
-            $process.Refresh()
-            if ($process.HasExited) { throw "Transcencode crashed after UI exercises with code $($process.ExitCode)." }
-          }
-          finally {
-            if ($null -ne $process -and -not $process.HasExited) {
-              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            }
-            $env:APPDATA = $oldAppData
-            $env:LOCALAPPDATA = $oldLocalAppData
-          }
+          & 'transcencode/tests/Run-WindowsRuntimeSmoke.ps1' `
+            -PublishDir 'win/CS/HandBrakeWPF/bin/publish' `
+            -SmokeDir 'smoke'
 
       - name: Stage runtime-tested portable candidate
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $publish = 'win/CS/HandBrakeWPF/bin/publish'
-          New-Item -ItemType Directory -Path 'artifacts/Transcencode-Test-Candidate' -Force | Out-Null
-          Copy-Item "$publish/*" 'artifacts/Transcencode-Test-Candidate' -Recurse -Force
+          $candidate = 'artifacts/Transcencode-Test-Candidate'
+          New-Item -ItemType Directory -Path $candidate -Force | Out-Null
+          Copy-Item "$publish/*" $candidate -Recurse -Force
+          Copy-Item 'smoke/RUNTIME-SMOKE-PASSED.txt' $candidate -Force
+
           @"
           Transcencode Native WPF Test Candidate
-
           Analyze. Encode. Verify.
 
-          This candidate passed Windows launch, source scan, multilingual track,
-          black-bar preservation, automatic crop, Deep Analyze, recommendation,
-          interface scaling, and native-tab smoke tests in GitHub Actions.
+          This candidate passed an automated Windows runtime test that launched
+          the native graphical interface, loaded multilingual test media,
+          exercised Source Tracks and Deep Analyze, applied the quality
+          recommendation to the Video tab, verified black-bar preservation and
+          automatic cropping, exercised every new tab, and changed/reset whole-
+          interface scaling.
 
-          The executable remains HandBrake.exe internally during compatibility testing.
-          Extract the complete folder and keep every file together.
-          "@ | Set-Content 'artifacts/Transcencode-Test-Candidate/TEST-CANDIDATE.txt' -Encoding UTF8
+          The internal executable remains HandBrake.exe during compatibility
+          testing. Extract the complete folder and keep every file together.
+          "@ | Set-Content (Join-Path $candidate 'TEST-CANDIDATE.txt') -Encoding UTF8
 
           Compress-Archive `
-            -Path 'artifacts/Transcencode-Test-Candidate' `
+            -Path $candidate `
             -DestinationPath 'artifacts/Transcencode-Native-WPF-Test-Candidate-x64.zip' `
             -Force
 
@@ -481,43 +144,28 @@ jobs:
           path: artifacts/Transcencode-Native-WPF-Test-Candidate-x64.zip
           if-no-files-found: error
 
-      - name: Fail on crash signatures and collect diagnostics
+      - name: Collect smoke-test diagnostics
         if: always()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $smokeRoot = (Resolve-Path 'smoke').Path
-          $diagnostics = Join-Path $smokeRoot 'diagnostics'
-          New-Item -ItemType Directory -Path $diagnostics -Force | Out-Null
+          if (-not (Test-Path 'smoke')) { exit 0 }
+          New-Item -ItemType Directory -Path 'smoke-diagnostics' -Force | Out-Null
 
-          Get-ChildItem $smokeRoot -File | ForEach-Object {
+          Get-ChildItem 'smoke' -File | ForEach-Object {
             if ($_.Length -lt 20MB) {
-              Copy-Item $_.FullName $diagnostics -Force -ErrorAction SilentlyContinue
+              Copy-Item $_.FullName 'smoke-diagnostics' -Force -ErrorAction SilentlyContinue
             }
           }
 
-          $logRoots = @(
-            (Join-Path $smokeRoot 'AppData\HandBrake'),
-            (Join-Path $smokeRoot 'LocalAppData\HandBrake'),
-            (Join-Path $smokeRoot 'AppData\Transcencode'),
-            (Join-Path $smokeRoot 'LocalAppData\Transcencode')
-          )
-          foreach ($logRoot in $logRoots) {
-            if (Test-Path $logRoot) {
-              Copy-Item $logRoot $diagnostics -Recurse -Force -ErrorAction SilentlyContinue
+          foreach ($relative in @(
+            'smoke/AppData/HandBrake',
+            'smoke/LocalAppData/HandBrake',
+            'smoke/AppData/Transcencode',
+            'smoke/LocalAppData/Transcencode')) {
+            if (Test-Path $relative) {
+              Copy-Item $relative 'smoke-diagnostics' -Recurse -Force -ErrorAction SilentlyContinue
             }
-          }
-
-          $crashSignatures = @()
-          $textFiles = Get-ChildItem $diagnostics -Recurse -File -Include '*.txt','*.log','*.json' -ErrorAction SilentlyContinue
-          foreach ($file in $textFiles) {
-            $text = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
-            if ($text -match '(?i)unhandled exception|access violation|fatal error|stack overflow') {
-              $crashSignatures += $file.FullName
-            }
-          }
-          if ($crashSignatures.Count -gt 0) {
-            throw "Crash signatures were found in: $($crashSignatures -join ', ')"
           }
 
       - name: Upload smoke-test diagnostics
@@ -525,5 +173,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: Transcencode-Windows-Smoke-Diagnostics
-          path: smoke/diagnostics
+          path: smoke-diagnostics
           if-no-files-found: warn
