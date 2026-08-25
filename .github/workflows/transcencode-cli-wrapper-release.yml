@@ -1,0 +1,76 @@
+name: Publish Transcencode CLI Wrapper Test Candidate
+
+on:
+  workflow_run:
+    workflows:
+      - "Transcencode CLI Wrapper Windows Gate"
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish_prerelease:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'transcencode/cli-wrapper-stable'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Download the exact tested artifact from the successful workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p candidate
+          artifact_json="$(gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}/artifacts")"
+          artifact_id="$(jq -r '.artifacts[] | select(.name == "Transcencode-CLI-Wrapper-Windows-x64-0.2.9") | .id' <<<"${artifact_json}" | head -n1)"
+          if [[ -z "${artifact_id}" || "${artifact_id}" == "null" ]]; then
+            echo "The successful build did not publish the expected artifact." >&2
+            exit 1
+          fi
+          gh api "repos/${REPOSITORY}/actions/artifacts/${artifact_id}/zip" > candidate.zip
+          unzip -q candidate.zip -d candidate
+          find candidate -maxdepth 3 -type f -print
+
+      - name: Verify release payload and hashes
+        run: |
+          set -euo pipefail
+          installer="$(find candidate -name 'Transcencode-Setup-x64-0.2.9.exe' -type f -print -quit)"
+          portable="$(find candidate -name 'Transcencode-CLI-Wrapper-x64-Portable-0.2.9.zip' -type f -print -quit)"
+          sums="$(find candidate -name 'SHA256SUMS.txt' -type f -print -quit)"
+          readme="$(find candidate -name 'TEST-CANDIDATE-README.txt' -type f -print -quit)"
+          selftest="$(find candidate -name 'CLI-WRAPPER-SELF-TEST.txt' -type f -print -quit)"
+          startup="$(find candidate -name 'NORMAL-GUI-STARTUP-PASSED.txt' -type f -print -quit)"
+          for file in "${installer}" "${portable}" "${sums}" "${readme}" "${selftest}" "${startup}"; do
+            [[ -n "${file}" && -f "${file}" ]] || { echo "Missing release payload" >&2; exit 1; }
+          done
+          grep -q 'TRANSCENCODE_CLI_WRAPPER_SELF_TEST_PASSED' "${selftest}"
+          grep -q 'TRANSCENCODE_NORMAL_GUI_STARTUP_PASSED' "${startup}"
+
+      - name: Create or replace the gated prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: cli-wrapper-0.2.9-test-candidate
+        run: |
+          set -euo pipefail
+          gh release delete "${TAG}" --repo "${REPOSITORY}" --yes --cleanup-tag >/dev/null 2>&1 || true
+          installer="$(find candidate -name 'Transcencode-Setup-x64-0.2.9.exe' -type f -print -quit)"
+          portable="$(find candidate -name 'Transcencode-CLI-Wrapper-x64-Portable-0.2.9.zip' -type f -print -quit)"
+          sums="$(find candidate -name 'SHA256SUMS.txt' -type f -print -quit)"
+          readme="$(find candidate -name 'TEST-CANDIDATE-README.txt' -type f -print -quit)"
+          selftest="$(find candidate -name 'CLI-WRAPPER-SELF-TEST.txt' -type f -print -quit)"
+          startup="$(find candidate -name 'NORMAL-GUI-STARTUP-PASSED.txt' -type f -print -quit)"
+          gh release create "${TAG}" \
+            --repo "${REPOSITORY}" \
+            --target "${{ github.event.workflow_run.head_sha }}" \
+            --title "Transcencode CLI Wrapper 0.2.9 — Windows Test Candidate" \
+            --prerelease \
+            --notes-file "${readme}" \
+            "${installer}" "${portable}" "${sums}" "${selftest}" "${startup}"
