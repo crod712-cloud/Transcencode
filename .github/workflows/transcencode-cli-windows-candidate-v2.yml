@@ -1,0 +1,512 @@
+name: Transcencode CLI Windows Candidate V2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/cli-stable"
+    paths:
+      - "transcencode-cli/**"
+      - ".github/workflows/transcencode-cli-windows-candidate-v2.yml"
+
+concurrency:
+  group: transcencode-cli-windows-candidate-v2
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build_test_package_release:
+    name: Build, normal-launch, encode, verify, install, and publish
+    runs-on: windows-2022
+    timeout-minutes: 75
+
+    steps:
+      - name: Check out dedicated Transcencode branch
+        uses: actions/checkout@v4
+        with:
+          ref: transcencode/cli-stable
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Normalize source deterministically
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python 'transcencode-cli/tools/Normalize-CliSourceV2.py'
+
+      - name: Run command construction, progress, ETA, and JSON parser tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run `
+            --project 'transcencode-cli/tests/Transcencode.CommandTests/Transcencode.CommandTests.csproj' `
+            --configuration Release
+
+      - name: Download and verify official HandBrakeCLI 1.11.2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Path 'transcencode-cli/runtime' -Force | Out-Null
+          $archive = 'transcencode-cli/runtime/HandBrakeCLI-1.11.2-win-x86_64.zip'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/HandBrakeCLI-1.11.2-win-x86_64.zip' `
+            -OutFile $archive
+          $expected = '80bfe8d5f5d11cc3ef76b834add3ed4e82dee6523ffeb435c283f88b1a21f09d'
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "HandBrakeCLI checksum mismatch. Expected $expected; received $actual."
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath 'transcencode-cli/runtime/handbrake' -Force
+          $cli = Get-ChildItem 'transcencode-cli/runtime/handbrake' -Filter 'HandBrakeCLI.exe' -Recurse | Select-Object -First 1
+          if ($null -eq $cli) { throw 'The verified archive did not contain HandBrakeCLI.exe.' }
+          Copy-Item $cli.FullName 'transcencode-cli/runtime/HandBrakeCLI.exe' -Force
+          & 'transcencode-cli/runtime/HandBrakeCLI.exe' --version
+          if ($LASTEXITCODE -ne 0) { throw 'HandBrakeCLI version probe failed.' }
+
+      - name: Verify required encoder and command-line capabilities
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $help = & 'transcencode-cli/runtime/HandBrakeCLI.exe' --help 2>&1 | Out-String
+          foreach ($required in @(
+            'nvenc_h264',
+            'nvenc_h265',
+            'nvenc_h265_10bit',
+            '--crop-mode',
+            '--allow-upscaling',
+            '--all-audio',
+            '--all-subtitles',
+            '--json')) {
+            if (-not $help.Contains($required, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "The verified HandBrakeCLI build does not advertise required capability: $required"
+            }
+          }
+
+      - name: Publish self-contained Windows x64 graphical application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = 'transcencode-cli/artifacts/publish'
+          if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }
+          dotnet publish 'transcencode-cli/src/Transcencode/Transcencode.csproj' `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --output $publish
+          Copy-Item 'transcencode-cli/runtime/HandBrakeCLI.exe' $publish -Force
+          Copy-Item 'COPYING' (Join-Path $publish 'COPYING-HandBrake-GPLv2.txt') -Force
+          Copy-Item 'transcencode-cli/README.md' (Join-Path $publish 'README.txt') -Force
+          @(
+            'Transcencode third-party notices',
+            '',
+            'Encoding engine: HandBrakeCLI 1.11.2',
+            'Source: https://github.com/HandBrake/HandBrake',
+            'License: GNU General Public License version 2; see COPYING-HandBrake-GPLv2.txt.',
+            '',
+            'Transcencode starts HandBrakeCLI as a hidden child process with redirected output.',
+            'No separate command prompt is required. Live output, progress, FPS, ETA, and the',
+            'estimated finish time are displayed inside the Transcencode window.'
+          ) | Set-Content (Join-Path $publish 'THIRD-PARTY-NOTICES.txt') -Encoding UTF8
+          foreach ($required in @('Transcencode.exe','Transcencode.dll','HandBrakeCLI.exe')) {
+            if (-not (Test-Path (Join-Path $publish $required))) {
+              throw "Publish output is missing $required."
+            }
+          }
+
+      - name: Confirm Windows GUI subsystem and hidden engine process contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engineSource = Get-Content 'transcencode-cli/src/Transcencode/HandBrakeCliService.cs' -Raw
+          foreach ($required in @(
+            'UseShellExecute = false',
+            'CreateNoWindow = true',
+            'WindowStyle = ProcessWindowStyle.Hidden',
+            'RedirectStandardOutput = true',
+            'RedirectStandardError = true')) {
+            if (-not $engineSource.Contains($required, [StringComparison]::Ordinal)) {
+              throw "Hidden engine-process contract is missing: $required"
+            }
+          }
+
+          $exe = 'transcencode-cli/artifacts/publish/Transcencode.exe'
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $optionalHeader = $peOffset + 24
+          $subsystem = [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+          if ($subsystem -ne 2) {
+            throw "Transcencode.exe has PE subsystem $subsystem rather than Windows GUI subsystem 2."
+          }
+
+      - name: Install ffmpeg for deterministic regression media
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          }
+          ffmpeg -version | Select-Object -First 1
+          ffprobe -version | Select-Object -First 1
+
+      - name: Generate controlled black-bar source with English and Spanish tracks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $smoke = 'transcencode-cli/artifacts/smoke'
+          New-Item -ItemType Directory -Path $smoke -Force | Out-Null
+          @"
+          1
+          00:00:00,500 --> 00:00:03,000
+          English subtitle test
+          "@ | Set-Content (Join-Path $smoke 'english.srt') -Encoding UTF8
+          @"
+          1
+          00:00:00,500 --> 00:00:03,000
+          Prueba de subtítulos en español
+          "@ | Set-Content (Join-Path $smoke 'spanish.srt') -Encoding UTF8
+
+          ffmpeg -hide_banner -loglevel error -y `
+            -f lavfi -i 'color=c=black:s=1280x720:r=30:d=12' `
+            -f lavfi -i 'testsrc2=s=1280x544:r=30:d=12' `
+            -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=12' `
+            -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=12' `
+            -i (Join-Path $smoke 'english.srt') `
+            -i (Join-Path $smoke 'spanish.srt') `
+            -filter_complex '[0:v][1:v]overlay=0:88:shortest=1[v]' `
+            -map '[v]' -map 2:a -map 3:a -map 4:0 -map 5:0 `
+            -metadata:s:a:0 language=eng -metadata:s:a:0 title='English' `
+            -metadata:s:a:1 language=spa -metadata:s:a:1 title='Spanish' `
+            -metadata:s:s:0 language=eng -metadata:s:s:0 title='English' `
+            -metadata:s:s:1 language=spa -metadata:s:s:1 title='Español' `
+            -c:v libx264 -preset veryfast -crf 24 -pix_fmt yuv420p `
+            -c:a aac -b:a 96k -c:s srt `
+            (Join-Path $smoke 'source.mkv')
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $smoke 'source.mkv'))) {
+            throw 'Controlled regression source was not created.'
+          }
+
+      - name: Prove exact no-argument startup opens the main Transcencode window
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type @'
+          using System;
+          using System.Text;
+          using System.Runtime.InteropServices;
+          public static class WindowProbe {
+              public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+              [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+              [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+          }
+          '@
+
+          $publish = (Resolve-Path 'transcencode-cli/artifacts/publish').Path
+          $smoke = (Resolve-Path 'transcencode-cli/artifacts/smoke').Path
+          $appData = Join-Path $smoke 'NormalStartupAppData'
+          $localAppData = Join-Path $smoke 'NormalStartupLocalAppData'
+          New-Item -ItemType Directory -Path $appData,$localAppData -Force | Out-Null
+
+          $start = [Diagnostics.ProcessStartInfo]::new()
+          $start.FileName = Join-Path $publish 'Transcencode.exe'
+          $start.WorkingDirectory = $publish
+          $start.UseShellExecute = $false
+          $start.Environment['APPDATA'] = $appData
+          $start.Environment['LOCALAPPDATA'] = $localAppData
+          $process = [Diagnostics.Process]::Start($start)
+          if ($null -eq $process) { throw 'Windows did not start Transcencode.exe.' }
+
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(25)
+            $titles = @()
+            while ([DateTime]::UtcNow -lt $deadline) {
+              Start-Sleep -Milliseconds 500
+              $process.Refresh()
+              if ($process.HasExited) {
+                throw "Normal startup exited early with code $($process.ExitCode)."
+              }
+              $found = [Collections.Generic.List[string]]::new()
+              [WindowProbe]::EnumWindows({
+                param($hWnd, $lParam)
+                [uint32]$pid = 0
+                [void][WindowProbe]::GetWindowThreadProcessId($hWnd, [ref]$pid)
+                if ($pid -eq $process.Id) {
+                  $builder = [Text.StringBuilder]::new(1024)
+                  [void][WindowProbe]::GetWindowText($hWnd, $builder, $builder.Capacity)
+                  if ($builder.Length -gt 0) { $found.Add($builder.ToString()) }
+                }
+                return $true
+              }, [IntPtr]::Zero) | Out-Null
+              $titles = @($found)
+              if ($titles | Where-Object { $_ -eq 'Transcencode — Analyze. Encode. Verify.' }) { break }
+            }
+
+            if (-not ($titles | Where-Object { $_ -eq 'Transcencode — Analyze. Encode. Verify.' })) {
+              throw "The normal startup process stayed alive but did not expose the main Transcencode window. Windows found: $($titles -join ' | ')"
+            }
+            if ($titles | Where-Object { $_ -match 'error' }) {
+              throw "Normal startup exposed an error window: $($titles -join ' | ')"
+            }
+
+            $logs = Join-Path $localAppData 'Transcencode/logs'
+            if (Test-Path $logs) {
+              $failures = @(Get-ChildItem $logs -File -ErrorAction SilentlyContinue)
+              if ($failures.Count -gt 0) {
+                foreach ($failure in $failures) { Get-Content $failure.FullName -Raw | Write-Host }
+                throw 'Normal startup wrote a diagnostic error log.'
+              }
+            }
+            'TRANSCENCODE_NORMAL_STARTUP_PASSED' | Set-Content (Join-Path $smoke 'NORMAL-STARTUP-PASSED.txt') -Encoding UTF8
+          }
+          finally {
+            if (-not $process.HasExited) {
+              $process.Kill($true)
+              $process.WaitForExit(10000) | Out-Null
+            }
+          }
+
+      - name: Run packaged application scan, encode, and output re-scan self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = (Resolve-Path 'transcencode-cli/artifacts/publish').Path
+          $smoke = (Resolve-Path 'transcencode-cli/artifacts/smoke').Path
+          $source = (Resolve-Path 'transcencode-cli/artifacts/smoke/source.mkv').Path
+          $report = Join-Path $smoke 'PACKAGED-SELF-TEST.txt'
+          $appData = Join-Path $smoke 'SelfTestAppData'
+          $localAppData = Join-Path $smoke 'SelfTestLocalAppData'
+          New-Item -ItemType Directory -Path $appData,$localAppData -Force | Out-Null
+
+          $start = [Diagnostics.ProcessStartInfo]::new()
+          $start.FileName = Join-Path $publish 'Transcencode.exe'
+          $start.WorkingDirectory = $publish
+          $start.UseShellExecute = $false
+          $start.Environment['APPDATA'] = $appData
+          $start.Environment['LOCALAPPDATA'] = $localAppData
+          [void]$start.ArgumentList.Add("--self-test-report=$report")
+          [void]$start.ArgumentList.Add("--self-test-source=$source")
+          $process = [Diagnostics.Process]::Start($start)
+          if ($null -eq $process) { throw 'Could not start packaged application self-test.' }
+          if (-not $process.WaitForExit(300000)) {
+            $process.Kill($true)
+            throw 'Packaged application self-test exceeded five minutes.'
+          }
+          if (-not (Test-Path $report)) {
+            throw "Self-test exited with code $($process.ExitCode) without a report."
+          }
+          $text = Get-Content $report -Raw
+          Write-Host $text
+          if ($process.ExitCode -ne 0 -or $text -notmatch 'TRANSCENCODE_CLI_SELF_TEST_PASSED') {
+            $logs = Join-Path $localAppData 'Transcencode/logs'
+            if (Test-Path $logs) {
+              Get-ChildItem $logs -File | ForEach-Object { Get-Content $_.FullName -Raw | Write-Host }
+            }
+            throw 'Packaged application self-test failed.'
+          }
+
+      - name: Exercise app-style all-track preservation, automatic crop, and upscaling commands
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cli = (Resolve-Path 'transcencode-cli/runtime/HandBrakeCLI.exe').Path
+          $smoke = (Resolve-Path 'transcencode-cli/artifacts/smoke').Path
+          $source = (Resolve-Path 'transcencode-cli/artifacts/smoke/source.mkv').Path
+
+          $allTracks = Join-Path $smoke 'all-tracks.mkv'
+          & $cli --input $source --output $allTracks --format av_mkv --encoder x264 --quality 24 `
+            --crop 0:0:0:0 --all-audio --aencoder copy `
+            --audio-copy-mask aac,ac3,eac3,truehd,dts,dtshd,mp2,mp3,flac,opus `
+            --audio-fallback av_aac --all-subtitles --markers
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $allTracks)) { throw 'All-track preservation encode failed.' }
+          $audioCount = [int](ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 $allTracks | Measure-Object -Line).Lines
+          $subtitleCount = [int](ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 $allTracks | Measure-Object -Line).Lines
+          if ($audioCount -ne 2) { throw "Expected two audio tracks; output contains $audioCount." }
+          if ($subtitleCount -ne 2) { throw "Expected two subtitle tracks; output contains $subtitleCount." }
+          $width = [int](ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 $allTracks)
+          $height = [int](ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 $allTracks)
+          if ($width -ne 1280 -or $height -ne 720) { throw "Same as source produced ${width}x${height} instead of 1280x720." }
+
+          $autoCrop = Join-Path $smoke 'auto-crop.mkv'
+          & $cli --input $source --output $autoCrop --format av_mkv --encoder x264 --quality 26 `
+            --crop-mode auto --start-at seconds:1 --stop-at seconds:3
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $autoCrop)) { throw 'Automatic-crop sample encode failed.' }
+          $autoHeight = [int](ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 $autoCrop)
+          if ($autoHeight -ge 720) { throw "Automatic crop did not remove the controlled black bars; output height is $autoHeight." }
+
+          $upscale = Join-Path $smoke 'upscale-1080.mkv'
+          & $cli --input $source --output $upscale --format av_mkv --encoder x264 --quality 28 `
+            --crop 0:0:0:0 --width 1920 --height 1080 --keep-display-aspect --allow-upscaling `
+            --start-at seconds:1 --stop-at seconds:3
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $upscale)) { throw 'Upscaling sample encode failed.' }
+          $upWidth = [int](ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 $upscale)
+          $upHeight = [int](ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 $upscale)
+          if ($upWidth -ne 1920 -or $upHeight -ne 1080) { throw "1080p upscale produced ${upWidth}x${upHeight}." }
+
+          @(
+            'TRANSCENCODE_CLI_MEDIA_REGRESSIONS_PASSED',
+            'Two audio tracks preserved.',
+            'Two subtitle tracks preserved.',
+            'Same as source preserved 1280x720 including black bars.',
+            "Automatic crop reduced height to $autoHeight.",
+            'Upscaling produced 1920x1080.'
+          ) | Set-Content (Join-Path $smoke 'MEDIA-REGRESSIONS-PASSED.txt') -Encoding UTF8
+
+      - name: Build per-user Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = 'transcencode-cli/artifacts/publish'
+          Copy-Item 'transcencode-cli/artifacts/smoke/NORMAL-STARTUP-PASSED.txt' $publish -Force
+          Copy-Item 'transcencode-cli/artifacts/smoke/PACKAGED-SELF-TEST.txt' $publish -Force
+          Copy-Item 'transcencode-cli/artifacts/smoke/MEDIA-REGRESSIONS-PASSED.txt' $publish -Force
+          @(
+            'Transcencode CLI-first Windows test candidate 0.3.0',
+            'Analyze. Encode. Verify.',
+            '',
+            'Normal Windows graphical application; HandBrakeCLI runs as a hidden child process.',
+            'Live engine output, progress, FPS, ETA, and estimated finish time stay inside the app.',
+            '',
+            'This package passed exact no-argument startup, controlled source scan, completed',
+            'encode, output re-scan, Same as source frame preservation, all-track preservation,',
+            'automatic crop, software upscaling, installer, installed-app, and uninstall gates.'
+          ) | Set-Content (Join-Path $publish 'TEST-CANDIDATE.txt') -Encoding UTF8
+          Compress-Archive `
+            -Path "$publish/*" `
+            -DestinationPath 'transcencode-cli/artifacts/Transcencode-CLI-Test-Candidate-x64-0.3.0.zip' `
+            -Force
+
+          choco install innosetup -y --no-progress
+          $iscc = Get-ChildItem 'C:\Program Files (x86)\Inno Setup*' -Filter 'ISCC.exe' -Recurse | Select-Object -First 1
+          if ($null -eq $iscc) { throw 'ISCC.exe was not found after installing Inno Setup.' }
+          & $iscc.FullName 'transcencode-cli/installer/Transcencode.iss'
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
+          if (-not (Test-Path 'transcencode-cli/artifacts/installer/Transcencode-Setup-x64-0.3.0.exe')) {
+            throw 'The Windows installer was not created.'
+          }
+
+      - name: Install, normal-launch, self-test, and uninstall the actual installer output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = (Resolve-Path 'transcencode-cli/artifacts/installer/Transcencode-Setup-x64-0.3.0.exe').Path
+          $smoke = (Resolve-Path 'transcencode-cli/artifacts/smoke').Path
+          $installLog = Join-Path $smoke 'installer.log'
+          $install = Start-Process -FilePath $installer `
+            -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=$installLog") `
+            -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer failed with exit code $($install.ExitCode)." }
+
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs/Transcencode/Transcencode.exe'
+          if (-not (Test-Path $installed)) { throw "Installed application was not found at $installed" }
+          if (-not (Test-Path (Join-Path (Split-Path $installed) 'HandBrakeCLI.exe'))) {
+            throw 'Installed HandBrakeCLI.exe is missing.'
+          }
+
+          $report = Join-Path $smoke 'INSTALLED-SELF-TEST.txt'
+          $source = (Resolve-Path 'transcencode-cli/artifacts/smoke/source.mkv').Path
+          $process = Start-Process -FilePath $installed `
+            -ArgumentList @("--self-test-report=$report","--self-test-source=$source") `
+            -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $report)) { throw 'Installed application self-test failed.' }
+          $text = Get-Content $report -Raw
+          Write-Host $text
+          if ($text -notmatch 'TRANSCENCODE_CLI_SELF_TEST_PASSED') {
+            throw 'Installed application self-test did not contain its pass marker.'
+          }
+
+          $uninstaller = Join-Path (Split-Path $installed) 'unins000.exe'
+          if (-not (Test-Path $uninstaller)) { throw 'Installed uninstaller is missing.' }
+          $uninstall = Start-Process -FilePath $uninstaller `
+            -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') `
+            -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller failed with exit code $($uninstall.ExitCode)." }
+
+      - name: Write checksums and test evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            'transcencode-cli/artifacts/Transcencode-CLI-Test-Candidate-x64-0.3.0.zip',
+            'transcencode-cli/artifacts/installer/Transcencode-Setup-x64-0.3.0.exe'
+          )
+          $hashLines = foreach ($file in $files) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($file))"
+          }
+          $hashLines | Set-Content 'transcencode-cli/artifacts/SHA256SUMS.txt' -Encoding ASCII
+          @(
+            'TRANSCENCODE_CLI_WINDOWS_CANDIDATE_V2_PASSED',
+            '',
+            'Passed:',
+            '- command construction, progress, FPS, ETA, and JSON parser tests',
+            '- official HandBrakeCLI archive checksum verification',
+            '- required H.264/H.265/H.265 10-bit NVENC capability discovery',
+            '- Windows GUI subsystem verification',
+            '- hidden child-process and redirected-output contract verification',
+            '- exact no-argument startup with the real main window title',
+            '- no startup error window or diagnostic log',
+            '- English/Spanish audio and subtitle source scan',
+            '- completed packaged-app encode and output re-scan',
+            '- Same as source frame and black-bar preservation',
+            '- two audio and two subtitle tracks preserved',
+            '- automatic black-bar crop',
+            '- 1080p software upscaling',
+            '- per-user installer build',
+            '- silent installation and installed-app self-test',
+            '- silent uninstall',
+            '',
+            'Not hardware-tested in GitHub Actions:',
+            '- actual NVENC encode on an NVIDIA GPU',
+            '- HDR10 and Dolby Vision behavior on real media',
+            '- long-duration pause/resume/cancel and resource-leak testing'
+          ) | Set-Content 'transcencode-cli/artifacts/AUTOMATED-TEST-REPORT.txt' -Encoding UTF8
+
+      - name: Upload passing candidate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transcencode-CLI-Windows-Test-Candidate-V2-0.3.0
+          path: |
+            transcencode-cli/artifacts/Transcencode-CLI-Test-Candidate-x64-0.3.0.zip
+            transcencode-cli/artifacts/installer/Transcencode-Setup-x64-0.3.0.exe
+            transcencode-cli/artifacts/SHA256SUMS.txt
+            transcencode-cli/artifacts/AUTOMATED-TEST-REPORT.txt
+          if-no-files-found: error
+
+      - name: Replace prerelease only after every gate passed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete cli-test-0.3.0 \
+            --repo "${{ github.repository }}" \
+            --cleanup-tag \
+            --yes 2>/dev/null || true
+          gh release create cli-test-0.3.0 \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Transcencode CLI Test Candidate 0.3.0" \
+            --notes "CLI-first Windows stabilization candidate. This prerelease is created only after exact normal startup, scan, encode, output verification, media regressions, installer, installed-app, and uninstall gates all pass. NVIDIA hardware encoding still requires physical RTX testing." \
+            --prerelease \
+            transcencode-cli/artifacts/Transcencode-CLI-Test-Candidate-x64-0.3.0.zip \
+            transcencode-cli/artifacts/installer/Transcencode-Setup-x64-0.3.0.exe \
+            transcencode-cli/artifacts/SHA256SUMS.txt \
+            transcencode-cli/artifacts/AUTOMATED-TEST-REPORT.txt
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transcencode-CLI-Windows-Candidate-V2-Failure-Diagnostics
+          path: |
+            transcencode-cli/artifacts/smoke
+            transcencode-cli/artifacts/publish
+            transcencode-cli/artifacts/installer
+          if-no-files-found: warn
