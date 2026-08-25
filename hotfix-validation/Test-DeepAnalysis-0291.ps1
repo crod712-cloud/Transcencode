@@ -33,7 +33,8 @@ if ($result.IndexOf($expected, [StringComparison]::Ordinal) -lt 0) {
     throw "The corrected interpolation did not produce the expected text. Result: $result"
 }
 
-if ($source.IndexOf('$EncoderId: CQ/RF', [StringComparison]::Ordinal) -ge 0) {
+$invalidNeedle = '$EncoderId' + ': CQ/RF'
+if ($source.IndexOf($invalidNeedle, [StringComparison]::Ordinal) -ge 0) {
     throw 'The invalid unbraced PowerShell interpolation form returned.'
 }
 
