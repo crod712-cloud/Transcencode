@@ -103,7 +103,18 @@ jobs:
       - name: Run complete Windows runtime and UI smoke test
         shell: pwsh
         run: |
-          & 'transcencode/tests/Run-WindowsRuntimeSmoke.ps1' `
+          $ErrorActionPreference = 'Stop'
+          $scriptPath = 'transcencode/tests/Run-WindowsRuntimeSmoke.ps1'
+          $scriptText = [System.IO.File]::ReadAllText($scriptPath)
+          $oldLine = '    & $cli @Arguments 2>&1 | Tee-Object -FilePath $logPath'
+          $newLine = '    & $cli @Arguments 2>&1 | Tee-Object -FilePath $logPath | Out-Null'
+          if (-not $scriptText.Contains($oldLine, [System.StringComparison]::Ordinal)) {
+            throw 'Runtime smoke harness output-suppression anchor was not found.'
+          }
+          $scriptText = $scriptText.Replace($oldLine, $newLine)
+          [System.IO.File]::WriteAllText($scriptPath, $scriptText, [System.Text.UTF8Encoding]::new($false))
+
+          & $scriptPath `
             -PublishDir 'win/CS/HandBrakeWPF/bin/publish' `
             -SmokeDir 'smoke'
 
