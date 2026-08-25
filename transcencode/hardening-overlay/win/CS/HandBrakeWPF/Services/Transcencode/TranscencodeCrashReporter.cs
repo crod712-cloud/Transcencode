@@ -34,9 +34,30 @@ namespace HandBrakeWPF.Services.Transcencode
             Dispatcher.CurrentDispatcher.UnhandledException += Dispatcher_UnhandledException;
         }
 
+        internal static string RecordHandledError(string category, object error)
+        {
+            Exception exception = error as Exception
+                                  ?? new Exception(error?.ToString() ?? "No exception object was supplied.");
+            return WriteCrashReport(category, exception, false, "handled-error");
+        }
+
+        internal static string GetDiagnosticDirectory()
+        {
+            string overrideDirectory = Environment.GetEnvironmentVariable("TRANSCENCODE_DIAGNOSTIC_DIR");
+            if (!string.IsNullOrWhiteSpace(overrideDirectory))
+            {
+                return overrideDirectory;
+            }
+
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Transcencode",
+                "logs");
+        }
+
         private static void Dispatcher_UnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
         {
-            WriteCrashReport("WPF dispatcher unhandled exception", e.Exception, false);
+            WriteCrashReport("WPF dispatcher unhandled exception", e.Exception, false, "crash");
             // Do not hide application failures. Existing HandBrake handling and Windows crash behavior still apply.
         }
 
@@ -44,36 +65,34 @@ namespace HandBrakeWPF.Services.Transcencode
         {
             Exception exception = e.ExceptionObject as Exception
                                   ?? new Exception(e.ExceptionObject?.ToString() ?? "Unknown unhandled exception object.");
-            WriteCrashReport("AppDomain unhandled exception", exception, e.IsTerminating);
+            WriteCrashReport("AppDomain unhandled exception", exception, e.IsTerminating, "crash");
         }
 
         private static void TaskScheduler_UnobservedTaskException(object sender, UnobservedTaskExceptionEventArgs e)
         {
-            WriteCrashReport("Unobserved task exception", e.Exception, false);
+            WriteCrashReport("Unobserved task exception", e.Exception, false, "crash");
         }
 
-        private static void WriteCrashReport(string category, Exception exception, bool terminating)
+        private static string WriteCrashReport(string category, Exception exception, bool terminating, string filePrefix)
         {
             try
             {
                 lock (FileLock)
                 {
-                    string directory = Path.Combine(
-                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                        "Transcencode",
-                        "logs");
+                    string directory = GetDiagnosticDirectory();
                     Directory.CreateDirectory(directory);
 
                     string path = Path.Combine(
                         directory,
                         string.Format(
                             System.Globalization.CultureInfo.InvariantCulture,
-                            "crash-{0:yyyyMMdd-HHmmss-fff}-pid{1}.log",
+                            "{0}-{1:yyyyMMdd-HHmmss-fff}-pid{2}.log",
+                            filePrefix,
                             DateTime.UtcNow,
                             Environment.ProcessId));
 
                     StringBuilder report = new StringBuilder();
-                    report.AppendLine("Transcencode native WPF crash report");
+                    report.AppendLine("Transcencode native WPF diagnostic report");
                     report.AppendLine("Analyze. Encode. Verify.");
                     report.AppendLine();
                     report.AppendLine("UTC time: " + DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
@@ -81,20 +100,26 @@ namespace HandBrakeWPF.Services.Transcencode
                     report.AppendLine("Terminating: " + terminating);
                     report.AppendLine("Process ID: " + Environment.ProcessId);
                     report.AppendLine("Process path: " + Environment.ProcessPath);
+                    report.AppendLine("Base directory: " + AppDomain.CurrentDomain.BaseDirectory);
+                    report.AppendLine("Current directory: " + Environment.CurrentDirectory);
                     report.AppendLine("Application version: " + (Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "unknown"));
                     report.AppendLine("Runtime: " + System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription);
                     report.AppendLine("OS: " + System.Runtime.InteropServices.RuntimeInformation.OSDescription);
                     report.AppendLine("64-bit process: " + Environment.Is64BitProcess);
                     report.AppendLine("Working set: " + Process.GetCurrentProcess().WorkingSet64);
+                    report.AppendLine("APPDATA: " + Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
+                    report.AppendLine("LOCALAPPDATA: " + Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
                     report.AppendLine();
                     report.AppendLine(exception.ToString());
 
                     File.WriteAllText(path, report.ToString(), new UTF8Encoding(true));
+                    return path;
                 }
             }
             catch
             {
                 // A crash reporter must never replace the original failure with a secondary exception.
+                return string.Empty;
             }
         }
     }
