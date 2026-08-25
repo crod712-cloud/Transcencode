@@ -1,0 +1,151 @@
+name: Apply Transcencode CLI Source Fixes
+
+on:
+  push:
+    branches:
+      - "transcencode/cli-stable"
+    paths:
+      - ".github/workflows/apply-cli-source-fixes.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: transcencode/cli-stable
+
+      - name: Apply deterministic source corrections
+        shell: python
+        run: |
+          import pathlib
+          import re
+
+          root = pathlib.Path('.')
+
+          service_path = root / 'transcencode-cli/src/Transcencode/HandBrakeCliService.cs'
+          service = service_path.read_text(encoding='utf-8-sig')
+          replacement = '''    internal static ProgressInfo? TryParseProgress(string line)
+              {
+                  Match percentMatch = PercentRegex().Match(line);
+                  if (!percentMatch.Success ||
+                      !double.TryParse(percentMatch.Groups["percent"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double percent))
+                  {
+                      return null;
+                  }
+
+                  Match fpsMatch = FpsRegex().Match(line);
+                  Match etaMatch = EtaRegex().Match(line);
+                  double? currentFps = fpsMatch.Success ? ParseNullableDouble(fpsMatch.Groups["fps"].Value) : null;
+                  double? averageFps = fpsMatch.Success ? ParseNullableDouble(fpsMatch.Groups["avg"].Value) : null;
+                  TimeSpan? eta = etaMatch.Success ? ParseEta(etaMatch.Groups["eta"].Value) : null;
+
+                  return new ProgressInfo
+                  {
+                      Percent = Math.Clamp(percent, 0, 100),
+                      CurrentFps = currentFps,
+                      AverageFps = averageFps,
+                      Eta = eta,
+                      RawLine = line
+                  };
+              }
+
+              internal static string Tail'''
+          service, count = re.subn(
+              r'    internal static ProgressInfo\? TryParseProgress\(string line\)\n    \{.*?\n    \}\n\n    internal static string Tail',
+              replacement,
+              service,
+              count=1,
+              flags=re.S)
+          if count != 1:
+              raise SystemExit('Could not patch TryParseProgress exactly once.')
+
+          regex_replacement = '''    [GeneratedRegex(@"(?<percent>\\d+(?:\\.\\d+)?)\\s*%", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+              private static partial Regex PercentRegex();
+
+              [GeneratedRegex(@"(?<fps>\\d+(?:\\.\\d+)?)\\s*fps(?:,\\s*avg\\s*(?<avg>\\d+(?:\\.\\d+)?)\\s*fps)?", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+              private static partial Regex FpsRegex();
+
+              [GeneratedRegex(@"ETA\\s*(?<eta>(?:\\d+h)?(?:\\d+m)?(?:\\d+s)?|\\d{1,2}:\\d{2}:\\d{2}|unknown)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+              private static partial Regex EtaRegex();
+
+              [GeneratedRegex(@"(?:(?<h>\\d+)h)?(?:(?<m>\\d+)m)?(?:(?<s>\\d+)s)?", RegexOptions.IgnoreCase)]
+              private static partial Regex EtaUnitsRegex();'''
+          service, count = re.subn(
+              r'    \[GeneratedRegex\(\n        @"\(\?<percent>.*?private static partial Regex EtaUnitsRegex\(\);',
+              regex_replacement,
+              service,
+              count=1,
+              flags=re.S)
+          if count != 1:
+              raise SystemExit('Could not patch progress regex declarations exactly once.')
+          service_path.write_text(service, encoding='utf-8-sig')
+
+          window_path = root / 'transcencode-cli/src/Transcencode/MainWindow.xaml.cs'
+          window = window_path.read_text(encoding='utf-8-sig')
+          old = '        Dispatcher.BeginInvoke(() =>\n'
+          if window.count(old) != 1:
+              raise SystemExit('Expected exactly one Dispatcher.BeginInvoke call.')
+          window = window.replace(old, '        Dispatcher.InvokeAsync(() =>\n')
+          window_path.write_text(window, encoding='utf-8-sig')
+
+          command_path = root / 'transcencode-cli/src/Transcencode/HandBrakeCommandBuilder.cs'
+          command = command_path.read_text(encoding='utf-8-sig')
+          old = '''        return '\"' + value.Replace("\\\\", "\\\\\\\\", StringComparison.Ordinal)
+                           .Replace("\\\"", "\\\\\\\"", StringComparison.Ordinal) + '\"';'''
+          new = '''        return '\"' + value.Replace("\\\"", "\\\\\\\"", StringComparison.Ordinal) + '\"';'''
+          if command.count(old) != 1:
+              raise SystemExit('Could not find the display quoting implementation.')
+          command = command.replace(old, new)
+          command_path.write_text(command, encoding='utf-8-sig')
+
+          test_path = root / 'transcencode-cli/tests/Transcencode.CommandTests/Program.cs'
+          tests = test_path.read_text(encoding='utf-8-sig')
+          tests = tests.replace(
+              '"\\\"C:\\\\Program Files\\\\Transcencode\\\\HandBrakeCLI.exe\\\""',
+              '"\\\"C:\\Program Files\\Transcencode\\HandBrakeCLI.exe\\\""')
+          tests = tests.replace(
+              '"\\\"C:\\\\Input Files\\\\movie.mkv\\\""',
+              '"\\\"C:\\Input Files\\movie.mkv\\\""')
+          test_path.write_text(tests, encoding='utf-8-sig')
+
+          workflow_path = root / '.github/workflows/transcencode-cli-stable.yml'
+          workflow = workflow_path.read_text(encoding='utf-8')
+          old = '''          $headers = & dumpbin.exe /headers 'transcencode-cli/artifacts/publish/Transcencode.exe' | Out-String
+                    if ($headers -notmatch 'Windows GUI') {
+                      throw 'Transcencode.exe is not marked as a Windows GUI application.'
+                    }'''
+          new = '''          $exe = 'transcencode-cli/artifacts/publish/Transcencode.exe'
+                    $bytes = [IO.File]::ReadAllBytes($exe)
+                    $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+                    $optionalHeader = $peOffset + 24
+                    $subsystem = [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+                    if ($subsystem -ne 2) {
+                      throw "Transcencode.exe has PE subsystem $subsystem instead of Windows GUI (2)."
+                    }'''
+          if workflow.count(old) != 1:
+              raise SystemExit('Could not replace dumpbin subsystem check.')
+          workflow = workflow.replace(old, new)
+          workflow_path.write_text(workflow, encoding='utf-8')
+
+      - name: Commit source corrections
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'No source corrections were required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            transcencode-cli/src/Transcencode/HandBrakeCliService.cs \
+            transcencode-cli/src/Transcencode/MainWindow.xaml.cs \
+            transcencode-cli/src/Transcencode/HandBrakeCommandBuilder.cs \
+            transcencode-cli/tests/Transcencode.CommandTests/Program.cs \
+            .github/workflows/transcencode-cli-stable.yml
+          git commit -m 'Fix progress ETA parsing and Windows build checks'
+          git push origin HEAD:transcencode/cli-stable
