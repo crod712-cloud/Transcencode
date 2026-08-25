@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   runtime_smoke:
-    name: Build, launch, analyze, encode, and inspect native WPF UI
+    name: Build, launch, analyze, encode, and inspect native WPF app
     runs-on: windows-2022
     timeout-minutes: 45
 
@@ -99,24 +99,55 @@ jobs:
             $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
           }
           ffmpeg -version | Select-Object -First 1
+          ffprobe -version | Select-Object -First 1
 
-      - name: Run complete Windows runtime and UI smoke test
+      - name: Run black-bar, multilingual-track, and encode regression
+        shell: pwsh
+        run: |
+          & 'transcencode/tests/Run-CliRegression.ps1' `
+            -PublishDir 'win/CS/HandBrakeWPF/bin/publish' `
+            -SmokeDir 'smoke'
+
+      - name: Run native in-process WPF self-test
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $scriptPath = 'transcencode/tests/Run-WindowsRuntimeSmoke.ps1'
-          $scriptText = [System.IO.File]::ReadAllText($scriptPath)
-          $oldLine = '    & $cli @Arguments 2>&1 | Tee-Object -FilePath $logPath'
-          $newLine = '    & $cli @Arguments 2>&1 | Tee-Object -FilePath $logPath | Out-Null'
-          if (-not $scriptText.Contains($oldLine, [System.StringComparison]::Ordinal)) {
-            throw 'Runtime smoke harness output-suppression anchor was not found.'
-          }
-          $scriptText = $scriptText.Replace($oldLine, $newLine)
-          [System.IO.File]::WriteAllText($scriptPath, $scriptText, [System.Text.UTF8Encoding]::new($false))
+          $publish = (Resolve-Path 'win/CS/HandBrakeWPF/bin/publish').Path
+          $source = (Resolve-Path 'smoke/source.mkv').Path
+          $report = Join-Path (Resolve-Path 'smoke').Path 'NATIVE-WPF-SELF-TEST.txt'
+          $appData = Join-Path (Resolve-Path 'smoke').Path 'AppData'
+          $localAppData = Join-Path (Resolve-Path 'smoke').Path 'LocalAppData'
+          New-Item -ItemType Directory -Path $appData,$localAppData -Force | Out-Null
 
-          & $scriptPath `
-            -PublishDir 'win/CS/HandBrakeWPF/bin/publish' `
-            -SmokeDir 'smoke'
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = Join-Path $publish 'HandBrake.exe'
+          $startInfo.WorkingDirectory = $publish
+          $startInfo.UseShellExecute = $false
+          $startInfo.Environment['APPDATA'] = $appData
+          $startInfo.Environment['LOCALAPPDATA'] = $localAppData
+          [void]$startInfo.ArgumentList.Add($source)
+          [void]$startInfo.ArgumentList.Add('--no-hardware')
+          [void]$startInfo.ArgumentList.Add("--transcencode-self-test-report=$report")
+
+          $process = [System.Diagnostics.Process]::Start($startInfo)
+          if ($null -eq $process) { throw 'Could not start the native Transcencode WPF process.' }
+          if (-not $process.WaitForExit(240000)) {
+            $process.Kill($true)
+            throw 'The native Transcencode WPF self-test exceeded four minutes.'
+          }
+
+          if (-not (Test-Path $report)) {
+            throw "The native WPF process exited with code $($process.ExitCode) without writing its self-test report."
+          }
+
+          $reportText = Get-Content $report -Raw
+          Write-Host $reportText
+          if ($process.ExitCode -ne 0) {
+            throw "The native WPF self-test failed with exit code $($process.ExitCode)."
+          }
+          if ($reportText -notmatch 'TRANSCENCODE_NATIVE_SELF_TEST_PASSED') {
+            throw 'The native WPF self-test report did not contain its pass marker.'
+          }
 
       - name: Stage runtime-tested portable candidate
         shell: pwsh
@@ -126,18 +157,20 @@ jobs:
           $candidate = 'artifacts/Transcencode-Test-Candidate'
           New-Item -ItemType Directory -Path $candidate -Force | Out-Null
           Copy-Item "$publish/*" $candidate -Recurse -Force
-          Copy-Item 'smoke/RUNTIME-SMOKE-PASSED.txt' $candidate -Force
+          Copy-Item 'smoke/CLI-REGRESSION-PASSED.txt' $candidate -Force
+          Copy-Item 'smoke/NATIVE-WPF-SELF-TEST.txt' $candidate -Force
 
           @"
           Transcencode Native WPF Test Candidate
           Analyze. Encode. Verify.
 
-          This candidate passed an automated Windows runtime test that launched
-          the native graphical interface, loaded multilingual test media,
-          exercised Source Tracks and Deep Analyze, applied the quality
-          recommendation to the Video tab, verified black-bar preservation and
-          automatic cropping, exercised every new tab, and changed/reset whole-
-          interface scaling.
+          This candidate passed Windows tests that created multilingual source
+          media with real black bars, verified Same as source and automatic crop
+          encodes, launched the actual native WPF application, completed a source
+          scan, inspected the live WPF tab tree, exercised Source Tracks and Deep
+          Analyze, applied the recommendation to the native Video model, tested
+          Upscale & Enhance, validated black-bar labels/order, constructed every
+          new XAML view, and changed/persisted/reset whole-interface scaling.
 
           The internal executable remains HandBrake.exe during compatibility
           testing. Extract the complete folder and keep every file together.
