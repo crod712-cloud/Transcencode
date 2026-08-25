@@ -21,8 +21,6 @@ jobs:
       - name: Run exact parser regression
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           $PSVersionTable | Format-List | Out-String | Write-Host
           & '.\hotfix-validation\Test-DeepAnalysis-0291.ps1'
-          if ($LASTEXITCODE -ne 0) {
-            throw "Hotfix test exited with code $LASTEXITCODE"
-          }
