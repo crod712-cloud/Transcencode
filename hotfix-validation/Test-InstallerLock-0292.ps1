@@ -210,9 +210,15 @@ $unrelatedProcess = [System.Diagnostics.Process]::Start($unrelatedStart)
 
 try {
     Start-Sleep -Milliseconds 1200
+    Assert-True (-not $appProcess.HasExited) 'The simulated Transcencode process exited before detection.'
+    Assert-True (-not $unrelatedProcess.HasExited) 'The unrelated process exited before detection.'
+    $appRow = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId={0}' -f $appProcess.Id)
+    Write-Host ('Root path: {0}' -f $installDirectory)
+    Write-Host ('App command line: {0}' -f [string]$appRow.CommandLine)
     $detected = @(Get-TranscencodeProcesses -RootPaths @($installDirectory, $backupDirectory))
-    Assert-True ($detected.ProcessId -contains $appProcess.Id) 'The running Transcencode PowerShell process was not detected.'
-    Assert-True ($detected.ProcessId -notcontains $unrelatedProcess.Id) 'An unrelated PowerShell process was incorrectly matched.'
+    $detectedIds = @($detected | ForEach-Object { [int]$_.ProcessId })
+    Assert-True ($detectedIds -contains $appProcess.Id) 'The running Transcencode PowerShell process was not detected.'
+    Assert-True ($detectedIds -notcontains $unrelatedProcess.Id) 'An unrelated PowerShell process was incorrectly matched.'
 
     Stop-TranscencodeProcesses -RootPaths @($installDirectory, $backupDirectory)
     Assert-True ($appProcess.WaitForExit(10000)) 'The matching Transcencode process did not exit.'
