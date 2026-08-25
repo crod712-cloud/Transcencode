@@ -190,6 +190,7 @@ Start-Sleep -Seconds 300
 $unrelatedScript = Join-Path $outsideDirectory 'Unrelated.ps1'
 'Start-Sleep -Seconds 300' | Set-Content -LiteralPath $unrelatedScript -Encoding ASCII
 $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$lockProcess = $null
 
 $appStart = New-Object System.Diagnostics.ProcessStartInfo
 $appStart.FileName = $powershell
@@ -222,7 +223,6 @@ try {
     }
     Assert-True (Test-Path -LiteralPath $backupDirectory) 'The previously locked installation directory was not moved after shutdown.'
 
-    # Exercise retry behavior against a genuine exclusive Windows file handle.
     $lockedFile = Join-Path $outsideDirectory 'transient-lock.bin'
     [IO.File]::WriteAllBytes($lockedFile, [byte[]](1,2,3,4))
     $lockScript = Join-Path $outsideDirectory 'Hold-Lock.ps1'
