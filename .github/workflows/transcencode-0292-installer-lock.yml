@@ -1,0 +1,26 @@
+name: Transcencode 0.2.9.2 Installer Lock Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/cli-0.2.9.2-installer-lock-validation"
+
+permissions:
+  contents: read
+
+jobs:
+  installer_lock:
+    name: Detect, stop, wait, retry, replace, and recover on Windows
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run exact PowerShell 5.1 process and file-lock regression
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSVersionTable | Format-List | Out-String | Write-Host
+          & '.\hotfix-validation\Test-InstallerLock-0292.ps1'
