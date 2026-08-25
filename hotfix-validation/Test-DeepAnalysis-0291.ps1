@@ -29,11 +29,11 @@ if ($parseErrors.Count -ne 0) {
 
 $result = Test-DeepAnalysisSummaryInterpolation -EncoderId 'nvenc_h265_10bit' -RecommendedQuality 17
 $expected = 'Recommended starting quality for nvenc_h265_10bit: CQ/RF 17'
-if (-not $result.Contains($expected, [StringComparison]::Ordinal)) {
+if ($result.IndexOf($expected, [StringComparison]::Ordinal) -lt 0) {
     throw "The corrected interpolation did not produce the expected text. Result: $result"
 }
 
-if ($source.Contains('$EncoderId: CQ/RF', [StringComparison]::Ordinal)) {
+if ($source.IndexOf('$EncoderId: CQ/RF', [StringComparison]::Ordinal) -ge 0) {
     throw 'The invalid unbraced PowerShell interpolation form returned.'
 }
 
