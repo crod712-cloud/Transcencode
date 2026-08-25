@@ -1,0 +1,55 @@
+name: Publish Passing Transcencode CLI Test Candidate
+
+on:
+  workflow_run:
+    workflows:
+      - "Transcencode CLI Stable Windows Candidate"
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'transcencode/cli-stable'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the artifact produced by the fully passing Windows run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          gh run download "${RUN_ID}" \
+            --repo "${{ github.repository }}" \
+            --name "Transcencode-CLI-Windows-Test-Candidate-0.3.0" \
+            --dir release
+          test -f release/Transcencode-Setup-x64-0.3.0.exe
+          test -f release/Transcencode-CLI-Test-Candidate-x64-0.3.0.zip
+          test -f release/SHA256SUMS.txt
+          test -f release/AUTOMATED-TEST-REPORT.txt
+
+      - name: Replace the CLI test prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete cli-test-0.3.0 \
+            --repo "${{ github.repository }}" \
+            --cleanup-tag \
+            --yes 2>/dev/null || true
+          gh release create cli-test-0.3.0 \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.event.workflow_run.head_sha }}" \
+            --title "Transcencode CLI Test Candidate 0.3.0" \
+            --notes "CLI-first Windows stabilization candidate. Published automatically only after normal startup, scan, encode, verification, installer, installed-app, and uninstall tests all pass." \
+            --prerelease \
+            release/Transcencode-Setup-x64-0.3.0.exe \
+            release/Transcencode-CLI-Test-Candidate-x64-0.3.0.zip \
+            release/SHA256SUMS.txt \
+            release/AUTOMATED-TEST-REPORT.txt
