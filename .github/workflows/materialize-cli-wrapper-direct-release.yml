@@ -1,0 +1,96 @@
+name: Materialize Direct CLI Wrapper Prerelease
+
+on:
+  push:
+    branches:
+      - "transcencode/cli-wrapper-stable"
+    paths:
+      - ".github/workflows/materialize-cli-wrapper-direct-release.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: transcencode/cli-wrapper-stable
+          fetch-depth: 0
+
+      - name: Add release publication to the same gated Windows job
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/transcencode-cli-wrapper.yml')
+          text = path.read_text(encoding='utf-8')
+
+          old_permissions = 'permissions:\n  contents: read\n'
+          new_permissions = 'permissions:\n  contents: write\n'
+          if old_permissions in text:
+              text = text.replace(old_permissions, new_permissions, 1)
+          elif new_permissions not in text:
+              raise RuntimeError('Could not locate workflow permissions block.')
+
+          # A subtitle stream ending at three seconds must not shorten the controlled
+          # source below HandBrake's ten-second minimum title duration.
+          text = text.replace(
+              '-c:a aac -b:a 128k -c:s srt -shortest `\n            \'artifacts/smoke/source.mkv\'',
+              '-c:a aac -b:a 128k -c:s srt -t 12 `\n            \'artifacts/smoke/source.mkv\'')
+
+          release_step = r'''
+      - name: Publish the exact successful Windows-gated test candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: cli-wrapper-0.2.9-test-candidate
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag
+            if ($LASTEXITCODE -ne 0) { throw 'Could not replace the prior gated prerelease.' }
+          }
+          gh release create $env:RELEASE_TAG `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA `
+            --title 'Transcencode CLI Wrapper 0.2.9 — Windows Test Candidate' `
+            --prerelease `
+            --notes-file 'artifacts/TEST-CANDIDATE-README.txt' `
+            'artifacts/installer/Transcencode-Setup-x64-0.2.9.exe' `
+            'artifacts/Transcencode-CLI-Wrapper-x64-Portable-0.2.9.zip' `
+            'artifacts/SHA256SUMS.txt' `
+            'artifacts/CLI-WRAPPER-SELF-TEST.txt' `
+            'artifacts/NORMAL-GUI-STARTUP-PASSED.txt'
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub prerelease publication failed.' }
+
+'''
+          marker = '      - name: Upload diagnostics on failure\n'
+          if 'Publish the exact successful Windows-gated test candidate' not in text:
+              if marker not in text:
+                  raise RuntimeError('Could not locate the diagnostics step insertion point.')
+              text = text.replace(marker, release_step + marker, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+          git diff -- .github/workflows/transcencode-cli-wrapper.yml
+
+      - name: Commit the direct-release gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/transcencode-cli-wrapper.yml
+          if git diff --cached --quiet; then
+            echo 'The direct-release gate was already materialized.'
+            exit 0
+          fi
+          git commit -m 'Publish only the fully gated CLI wrapper test candidate'
+          git push origin HEAD:transcencode/cli-wrapper-stable
