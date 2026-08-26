@@ -117,6 +117,6 @@ jobs:
           $comparison = Compare-TranscencodePreviewImages -ReferencePath $jpeg -CandidatePath $jpeg
           $gate = Test-TranscencodeVisualTransparency -Comparisons @($comparison)
           if (-not $gate.Passed) { throw 'An identical color image did not pass the exact module visual-transparency gate.' }
-          if ([double]$comparison.PSNR -lt 98 -or [double]$comparison.MAE -gt 0.001) { throw 'Exact module color comparison was not effectively identical.' }
-          Write-Host ("PASS exact color-aware comparison: PSNR {0:0.0} dB, MAE {1:0.000}." -f $comparison.PSNR,$comparison.MAE)
+          if ([double]$comparison.PsnrDb -lt 98 -or [double]$comparison.MeanAbsoluteError -gt 0.001) { throw 'Exact module color comparison was not effectively identical.' }
+          Write-Host ("PASS exact color-aware comparison: PSNR {0:0.0} dB, MAE {1:0.000}." -f $comparison.PsnrDb,$comparison.MeanAbsoluteError)
           Write-Host 'TRANSCENCODE_0300_EXACT_SOURCE_WINDOWS_TEST_PASSED'
