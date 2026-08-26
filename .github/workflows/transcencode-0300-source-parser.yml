@@ -1,0 +1,122 @@
+name: Transcencode 0.3.0 Exact Source Windows PowerShell Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/cli-0.3.0-auto-quality-validation"
+
+permissions:
+  contents: read
+
+jobs:
+  exact_source:
+    name: Reconstruct, hash, parse, import, and exercise exact 0.3.0 source
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct exact locally-built source payloads
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'transcencode-0300-exact-source'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+
+          function Expand-GzipBase64Parts {
+              param(
+                  [Parameter(Mandatory=$true)][string]$Pattern,
+                  [Parameter(Mandatory=$true)][string]$Destination
+              )
+              $parts = @(Get-ChildItem $Pattern | Sort-Object Name)
+              if ($parts.Count -eq 0) { throw "No source payload parts matched $Pattern" }
+              $builder = New-Object System.Text.StringBuilder
+              foreach ($part in $parts) { [void]$builder.Append((Get-Content -LiteralPath $part.FullName -Raw).Trim()) }
+              $compressed = [Convert]::FromBase64String($builder.ToString())
+              $input = New-Object IO.MemoryStream(,$compressed)
+              $gzip = New-Object IO.Compression.GzipStream($input,[IO.Compression.CompressionMode]::Decompress)
+              $output = New-Object IO.MemoryStream
+              try { $gzip.CopyTo($output) } finally { $gzip.Dispose(); $input.Dispose() }
+              try { [IO.File]::WriteAllBytes($Destination,$output.ToArray()) } finally { $output.Dispose() }
+          }
+
+          $app = Join-Path $root 'Transcencode.ps1'
+          $module = Join-Path $root 'DeepAnalysis.psm1'
+          Expand-GzipBase64Parts '.\hotfix-validation\source-b64\Transcencode.ps1.gz.b64.part*' $app
+          Expand-GzipBase64Parts '.\hotfix-validation\source-b64\DeepAnalysis.psm1.gz.b64.part*' $module
+
+          $appHash = (Get-FileHash $app -Algorithm SHA256).Hash.ToLowerInvariant()
+          $moduleHash = (Get-FileHash $module -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($appHash -ne '5e911c4d2f4cc2fe94184f95e495a55505002ffc8b2184d299a981ca146ceb5e') { throw "Exact app hash mismatch: $appHash" }
+          if ($moduleHash -ne '64648e80c38fc3a88429156d4f5a3217d38cba158adf100178a894210dbee988') { throw "Exact DeepAnalysis hash mismatch: $moduleHash" }
+          "TRANSCENCODE_EXACT_APP=$app" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TRANSCENCODE_EXACT_MODULE=$module" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "PASS exact source hashes: app=$appHash module=$moduleHash"
+
+      - name: Parse every byte of the exact app and module with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) { throw 'Validation must run under Windows PowerShell 5.1.' }
+          foreach ($path in @($env:TRANSCENCODE_EXACT_APP,$env:TRANSCENCODE_EXACT_MODULE)) {
+              $tokens = $null
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors) | Out-Null
+              if ($errors.Count -gt 0) {
+                  $errors | ForEach-Object { Write-Host ("Parser error at {0}:{1}: {2}" -f $_.Extent.StartLineNumber,$_.Extent.StartColumnNumber,$_.Message) }
+                  throw "Windows PowerShell 5.1 reported $($errors.Count) parser error(s) in $path."
+              }
+              Write-Host "PASS PowerShell 5.1 parser: $path"
+          }
+
+      - name: Verify automatic mode cannot silently behave like a CQ 16 preset
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $text = Get-Content -LiteralPath $env:TRANSCENCODE_EXACT_APP -Raw
+          foreach ($required in @(
+              "Id = 'auto_visual'; Name = 'Automatic visually transparent - analyze and choose for me'",
+              "Quality = [double](Get-EffectiveQualityForCurrentSource -ThrowIfUnavailable)",
+              'Ensure-AutomaticVisualQuality',
+              'Test-AutomaticCalibrationCurrent',
+              'EncoderPreset = [string](Get-EncoderPreset',
+              "Visibility]::Collapsed"
+          )) {
+              if ($text.IndexOf($required,[StringComparison]::Ordinal) -lt 0) { throw "Required automatic-quality wiring was missing: $required" }
+          }
+          if ($text -match "'auto_visual'\s*\{[^}]*return\s+16(?:\.0)?\b") { throw 'Automatic mode still contains a hard-coded CQ/RF 16 return.' }
+          Write-Host 'PASS automatic mode is analysis-gated and contains no CQ/RF 16 fallback.'
+
+      - name: Import and exercise the exact color-aware analysis module
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName PresentationCore
+          Add-Type -AssemblyName WindowsBase
+          Add-Type -AssemblyName System.Drawing
+          Import-Module $env:TRANSCENCODE_EXACT_MODULE -Force
+
+          $nvenc = @(Get-TranscencodeAutomaticQualitySearchPoints 'nvenc_h265_10bit')
+          $av1 = @(Get-TranscencodeAutomaticQualitySearchPoints 'svt_av1_10bit')
+          if ($nvenc.Count -lt 5 -or [double]$nvenc[0] -ne 32 -or [double]$nvenc[-1] -ne 1) { throw 'NVENC automatic search ladder is invalid.' }
+          if ($av1.Count -lt 5 -or [double]$av1[0] -ne 40 -or [double]$av1[-1] -ne 1) { throw 'AV1 automatic search ladder is invalid.' }
+
+          $jpeg = Join-Path $env:RUNNER_TEMP 'transcencode-color-compare.jpg'
+          $bitmap = New-Object System.Drawing.Bitmap 160,90
+          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+          try {
+              $graphics.Clear([System.Drawing.Color]::FromArgb(16,35,64))
+              $brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(220,95,35))
+              try { $graphics.FillRectangle($brush,20,15,100,45) } finally { $brush.Dispose() }
+              $bitmap.Save($jpeg,[System.Drawing.Imaging.ImageFormat]::Jpeg)
+          }
+          finally { $graphics.Dispose(); $bitmap.Dispose() }
+
+          $comparison = Compare-TranscencodePreviewImages -ReferencePath $jpeg -CandidatePath $jpeg
+          $gate = Test-TranscencodeVisualTransparency -Comparisons @($comparison)
+          if (-not $gate.Passed) { throw 'An identical color image did not pass the exact module visual-transparency gate.' }
+          if ([double]$comparison.PSNR -lt 98 -or [double]$comparison.MAE -gt 0.001) { throw 'Exact module color comparison was not effectively identical.' }
+          Write-Host ("PASS exact color-aware comparison: PSNR {0:0.0} dB, MAE {1:0.000}." -f $comparison.PSNR,$comparison.MAE)
+          Write-Host 'TRANSCENCODE_0300_EXACT_SOURCE_WINDOWS_TEST_PASSED'
