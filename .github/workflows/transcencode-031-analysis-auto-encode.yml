@@ -1,0 +1,26 @@
+name: Transcencode 0.3.1 Analysis Auto Encode Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/cli-0.3.1-analysis-auto-encode-validation"
+
+permissions:
+  contents: read
+
+jobs:
+  analysis_auto_encode:
+    name: Validate destination folder, collision safety, XAML, and encode handoff
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run exact Windows PowerShell 5.1 regression
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSVersionTable | Format-List | Out-String | Write-Host
+          & '.\hotfix-validation\Test-AnalysisAutoEncode-031.ps1'
