@@ -18,6 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Diagnose destination path behavior
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & '.\hotfix-validation\Debug-AnalysisOutputPath-031.ps1'
+
       - name: Run exact Windows PowerShell 5.1 regression
         shell: powershell
         run: |
