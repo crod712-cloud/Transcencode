@@ -1,0 +1,60 @@
+name: Transcencode 0.3.0 Automatic Quality Windows Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "transcencode/cli-0.3.0-auto-quality-validation"
+
+permissions:
+  contents: read
+
+jobs:
+  auto_quality:
+    name: Capture previews before cleanup and exercise decoded-picture gate
+    runs-on: windows-2022
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download verified HandBrakeCLI 1.11.2
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $archive = Join-Path $env:RUNNER_TEMP 'HandBrakeCLI-1.11.2-win-x86_64.zip'
+          Invoke-WebRequest -Uri 'https://github.com/HandBrake/HandBrake/releases/download/1.11.2/HandBrakeCLI-1.11.2-win-x86_64.zip' -OutFile $archive
+          $expected = '80bfe8d5f5d11cc3ef76b834add3ed4e82dee6523ffeb435c283f88b1a21f09d'
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "HandBrakeCLI checksum mismatch: $actual" }
+          $engine = Join-Path $env:RUNNER_TEMP 'handbrake-engine'
+          Expand-Archive -LiteralPath $archive -DestinationPath $engine -Force
+          $cli = Get-ChildItem $engine -Filter 'HandBrakeCLI.exe' -Recurse | Select-Object -First 1
+          if ($null -eq $cli) { throw 'Verified HandBrakeCLI archive did not contain HandBrakeCLI.exe.' }
+          "TRANSCENCODE_HBCLI=$($cli.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $cli.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw 'HandBrakeCLI --version failed.' }
+
+      - name: Install FFmpeg and generate a controlled source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install ffmpeg -y --no-progress
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          $source = Join-Path $env:RUNNER_TEMP 'transcencode-auto-quality-source.mkv'
+          ffmpeg -hide_banner -loglevel warning -y `
+            -f lavfi -i 'testsrc2=size=1280x720:rate=30:duration=18' `
+            -vf 'eq=brightness=-0.12:contrast=1.15,noise=alls=8:allf=t+u' `
+            -c:v libx264 -preset veryfast -crf 8 -pix_fmt yuv420p `
+            -an $source
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $source)) { throw 'FFmpeg source generation failed.' }
+          "TRANSCENCODE_TEST_SOURCE=$source" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run exact Windows PowerShell 5.1 regression
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSVersionTable | Format-List | Out-String | Write-Host
+          if ($PSVersionTable.PSVersion.Major -ne 5) { throw 'This regression must run under Windows PowerShell 5.1.' }
+          & '.\hotfix-validation\Test-AutoQuality-0300.ps1'
